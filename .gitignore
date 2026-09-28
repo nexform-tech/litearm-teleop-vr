@@ -1,0 +1,15 @@
+# Provisional: replace once the documentation toolchain is chosen
+# (MkDocs, Docusaurus, Sphinx, VitePress, ...).
+
+# Rendered site
+site/
+_build/
+build/
+dist/
+public/
+
+# Toolchain caches
+.cache/
+node_modules/
+.venv/
+__pycache__/
