@@ -166,6 +166,32 @@ because the target is re-based on the measured pose every frame, so a deadband o
 0.5 mm at 72 Hz acts as a velocity threshold of 3.6 cm/s. Zero means the solver
 sees every change.
 
+### The velocity is a curve, not a step and a zero
+
+Two things decide what the firmware sees in the velocity field, and both of them
+had to be fixed before the field was worth plotting.
+
+The controller runs at 100 Hz and the command stream does not: the node solves
+inverse kinematics per command, so most control cycles have no arrival in them.
+The velocity was recomputed every cycle, from the step of a setpoint that had not
+changed since the last one - which is zero. The field therefore went to zero
+between arrivals and back to the honest value on the next one. The firmware
+advances the position reference at the ceiling it is given, so a ceiling of zero
+half the time is an arm that moves half as far as it was told to, and a velocity
+plot of a session shows a band of spikes. The velocity is now worked out on the
+cycle a setpoint arrives and held until the next one.
+
+The node then gives that stream an actual motion profile: `max_joint_acceleration`
+(20 rad/s^2 by default) bounds how fast the speed may change and `max_joint_jerk`
+(1000 rad/s^3) bounds how fast that change may itself change, so a move starts and
+ends softly instead of asking for a step in speed. The limiter works out the
+fastest speed a joint may hold and still stop on its target, from the stopping law
+`v^2 / (2 a) + v a / (2 j) <= s` solved for the speed, and it includes the
+target's own rate as a feed forward, so a hand moving steadily is followed at that
+rate with no permanent offset. Tune `max_joint_acceleration` first: it is the
+number the operator feels. A lower `max_joint_jerk` is not "smoother" - it also
+delays the deceleration, which makes the arm overshoot instead of approaching.
+
 ### The tracking ratio, and the one switch that changes it
 
 The mapping is velocity form and re-bases its target on the measured pose every

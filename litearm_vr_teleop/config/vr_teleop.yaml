@@ -82,6 +82,24 @@ vr_teleop:
     low_pass_tau: 0.02
     moving_average_frames: 10
 
+    # The motion profile of the command stream: how fast a joint may move, how
+    # fast that speed may change, and how fast the change of speed may change.
+    #
+    # These exist because of what the firmware does with the velocity the
+    # controller writes - it is the slew ceiling of the position reference - so a
+    # command stream whose speed steps asks the firmware for a step in speed, and
+    # the field ends up pinned at its ceiling. Bounding the acceleration and then
+    # the jerk turns that stream into a curve the firmware can follow, at the cost
+    # of the arm taking a little longer to reach a new target: with the defaults,
+    # a rated 2 rad/s is reached in 0.1 s and full acceleration in 20 ms.
+    #
+    # The jerk ceiling is high on purpose: it softens the ends of a move, and a
+    # lower one also delays the deceleration, which makes the arm overshoot its
+    # target instead of approaching it. Tune max_joint_acceleration first; it is
+    # the number the operator feels. They are a starting point, not measurements.
+    max_joint_acceleration: 20.0
+    max_joint_jerk: 1000.0
+
     # What the hand's increment is measured against.
     #
     #   measured   the pose forward kinematics reports, so every frame starts

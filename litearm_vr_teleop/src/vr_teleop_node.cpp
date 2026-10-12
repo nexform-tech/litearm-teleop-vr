@@ -103,6 +103,7 @@ public:
   {
     mapper_ = std::make_unique<TeleopIncrementMapper>(buildAxisMapping(), teleop_limits_);
     filter_ = std::make_unique<JointTargetFilter>(teleop_limits_, joint_names_.size());
+    limiter_ = std::make_unique<JointRateLimiter>(rate_limits_, joint_names_.size());
 
     // The mapping is settable while the node runs, because the only person who
     // can tell whether a sign is right is the one holding the controller, and
@@ -269,6 +270,15 @@ private:
     teleop_limits_.low_pass_tau = readParameter<double>("low_pass_tau", 0.02);
     teleop_limits_.moving_average_frames = static_cast<std::size_t>(
       std::max(1, readParameter<int>("moving_average_frames", 10)));
+
+    // The motion profile of the command stream: how fast the joints may move,
+    // how fast that speed may change, and how fast the change of speed may
+    // change. See JointRateLimits for why the firmware makes these matter.
+    rate_limits_.max_velocity =
+      readParameter<double>("max_joint_velocity", rate_limits_.max_velocity);
+    rate_limits_.max_acceleration =
+      readParameter<double>("max_joint_acceleration", rate_limits_.max_acceleration);
+    rate_limits_.max_jerk = readParameter<double>("max_joint_jerk", rate_limits_.max_jerk);
 
     // How the controller's rotation reaches the tool. `world` is the geometric
     // default: the tool turns about the same world axis as the controller,
@@ -471,6 +481,7 @@ private:
     phase_ = Phase::kStopped;
     mapper_->reset();
     filter_->reset();
+    limiter_->reset();
     start_move_.reset();
     clearFollowState();
     saw_grip_ = false;
@@ -564,6 +575,7 @@ private:
       if (phase_ == Phase::kFollowing || phase_ == Phase::kReturningToStart) {
         mapper_->pause();
         filter_->reset();
+        limiter_->reset();
         start_move_.reset();
         clearFollowState();
         phase_ = Phase::kIdle;
@@ -626,6 +638,7 @@ private:
 
     mapper_->reset();
     filter_->reset();
+    limiter_->reset();
     start_move_.reset();
     clearFollowState();
     saw_grip_ = false;
@@ -649,6 +662,7 @@ private:
     start_move_ = std::make_unique<JointMoveProfile>(
       measured_, start_pose_, speed, accel, planner_->lowerLimits(), planner_->upperLimits());
     filter_->reset();
+    limiter_->reset();
     clearFollowState();
     phase_ = Phase::kReturningToStart;
     RCLCPP_INFO(
@@ -688,6 +702,7 @@ private:
         latest_frame_.quaternion.w, latest_frame_.quaternion.x, latest_frame_.quaternion.y,
         latest_frame_.quaternion.z).normalized());
     filter_->reset();
+    limiter_->reset();
     clearFollowState();
     phase_ = Phase::kFollowing;
     RCLCPP_INFO(get_logger(), "start pose reached: following the controller");
@@ -800,7 +815,12 @@ private:
       have_solution_ = true;
     }
 
-    publishPositions(filter_->apply(commanded_joints_, measured_, dt));
+    // Two stages, in this order. The filter bounds one cycle's step and damps the
+    // cycle to cycle jitter the solver leaves; the limiter gives the result a
+    // velocity, acceleration and jerk profile, which is what the firmware's slew
+    // ceiling needs in order to be a number rather than a saturation.
+    const Eigen::VectorXd filtered = filter_->apply(commanded_joints_, measured_, dt);
+    publishPositions(limiter_->apply(filtered, measured_, dt));
   }
 
   /// Forget the follow state: the cached target, the cached solution and the
@@ -822,6 +842,13 @@ private:
     // A hold is published rather than implied by silence. Silence would leave the
     // controller writing its last setpoint until its own staleness timeout, which
     // is a fraction of a second of travel nobody asked for.
+    //
+    // The rate limiter is put back to rest, because a hold is the arm standing
+    // still: without this, a refused solution or a pause would leave the limiter
+    // holding a velocity it was asking for when the last accepted target was
+    // still in front of it, and the first command after the hold would start at
+    // that speed instead of from zero.
+    limiter_->reset();
     publishPositions(measured_);
   }
 
@@ -903,6 +930,8 @@ private:
   std::unique_ptr<TeleopPlanner> planner_;
   std::unique_ptr<TeleopIncrementMapper> mapper_;
   std::unique_ptr<JointTargetFilter> filter_;
+  std::unique_ptr<JointRateLimiter> limiter_;
+  JointRateLimits rate_limits_;
   bool planner_ready_ = false;
   std::string planner_error_;
 

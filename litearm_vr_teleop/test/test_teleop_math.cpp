@@ -532,5 +532,98 @@ TEST(JointTargetFilter, RefusesToMoveWhenSizesDisagree)
   EXPECT_TRUE(filter.apply(wrong_size, current, 0.01).isApprox(current));
 }
 
+TEST(JointRateLimiter, KeepsTheCommandStreamInsideItsLimits)
+{
+  JointRateLimits limits;
+  limits.max_velocity = 2.0;
+  limits.max_acceleration = 20.0;
+  limits.max_jerk = 1000.0;
+  JointRateLimiter limiter(limits, 1);
+
+  // A target that jumps is the worst case a limiter can be handed, and the one
+  // the firmware cares about: it reads the velocity field as the slew ceiling of
+  // the position reference, so a command stream whose speed steps asks it for a
+  // step in speed and pins that field at its own limit. What matters is that the
+  // stream that comes out is differentiable twice over.
+  const double dt = 0.01;
+  const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.3).finished();
+  Eigen::VectorXd current = Eigen::VectorXd::Zero(1);
+
+  double previous_velocity = 0.0;
+  double previous_acceleration = 0.0;
+  for (int cycle = 0; cycle < 200; ++cycle) {
+    const Eigen::VectorXd next = limiter.apply(target, current, dt);
+    const double velocity = (next(0) - current(0)) / dt;
+    const double acceleration = (velocity - previous_velocity) / dt;
+    EXPECT_LE(std::abs(velocity), limits.max_velocity + 1e-9);
+    EXPECT_LE(std::abs(acceleration), limits.max_acceleration + 1e-9);
+    // The jerk bound is what makes the speed curve an S rather than a ramp, and
+    // it is the property the whole class exists for.
+    EXPECT_LE(std::abs(acceleration - previous_acceleration), limits.max_jerk * dt + 1e-9);
+    EXPECT_GE(next(0), current(0));            // monotone: no overshoot, no oscillation
+    EXPECT_LE(next(0), target(0) + 1e-12);     // and never past the target
+    previous_velocity = velocity;
+    previous_acceleration = acceleration;
+    current = next;
+  }
+
+  EXPECT_NEAR(current(0), target(0), 1e-6);
+}
+
+TEST(JointRateLimiter, TracksAMovingTargetWithoutLaggingBehindIt)
+{
+  JointRateLimits limits;
+  JointRateLimiter limiter(limits, 1);
+
+  // A target moving at a constant rate, which is what a hand moving steadily
+  // produces. The limiter must not turn that into a permanent offset: smoothing
+  // that costs gain is what makes an operator say the robot moves less than
+  // their hand, and the velocity form mapping's whole point is that the arm
+  // ends up where the hand is.
+  const double dt = 0.01;
+  const double rate = 0.5;   // rad/s, a quarter of the rated speed
+  Eigen::VectorXd current = Eigen::VectorXd::Zero(1);
+  Eigen::VectorXd target = Eigen::VectorXd::Zero(1);
+  for (int cycle = 0; cycle < 400; ++cycle) {
+    target(0) += rate * dt;
+    current = limiter.apply(target, current, dt);
+  }
+
+  EXPECT_NEAR(current(0), target(0), 1e-3);
+}
+
+TEST(JointRateLimiter, KeepsAStillHandStill)
+{
+  JointRateLimits limits;
+  JointRateLimiter limiter(limits, 1);
+
+  const double dt = 0.01;
+  Eigen::VectorXd current = Eigen::VectorXd::Zero(1);
+  const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.05).finished();
+  for (int cycle = 0; cycle < 300; ++cycle) {
+    current = limiter.apply(target, current, dt);
+  }
+  EXPECT_NEAR(current(0), target(0), 1e-9);
+
+  // Holding a reached target produces exactly no motion: a still hand does not
+  // produce a limit cycle, which is the other half of what this class is for.
+  double total = 0.0;
+  for (int cycle = 0; cycle < 100; ++cycle) {
+    const Eigen::VectorXd next = limiter.apply(target, current, dt);
+    total += std::abs(next(0) - current(0));
+    current = next;
+  }
+  EXPECT_NEAR(total, 0.0, 1e-12);
+}
+
+TEST(JointRateLimiter, RefusesATargetForADifferentNumberOfJoints)
+{
+  JointRateLimits limits;
+  JointRateLimiter limiter(limits, 3);
+  const Eigen::VectorXd current = Eigen::VectorXd::Zero(3);
+  const Eigen::VectorXd wrong_size = Eigen::VectorXd::Zero(2);
+  EXPECT_TRUE(limiter.apply(wrong_size, current, 0.01).isApprox(current));
+}
+
 }  // namespace
 }  // namespace litearm_vr_teleop

@@ -36,7 +36,7 @@ TEST(ForwardCommand, HoldsAtTheMeasuredPoseBeforeAnyCommand)
 
   Eigen::VectorXd positions = Eigen::VectorXd::Zero(3);
   Eigen::VectorXd velocities = Eigen::VectorXd::Zero(3);
-  const bool holding = tracker.update(nullptr, measured, -1.0, kCycleSeconds, positions, velocities);
+  const bool holding = tracker.update(nullptr, measured, -1.0, true, kCycleSeconds, positions, velocities);
 
   EXPECT_TRUE(holding);
   // The hold is at the measurement, and the velocity is written as zero because
@@ -57,7 +57,7 @@ TEST(ForwardCommand, DerivesVelocityFromTheSetpointStream)
   // A setpoint 0.004 rad away after 10 ms is 0.4 rad/s, inside the ceiling.
   const Eigen::VectorXd target = (Eigen::VectorXd(3) << 0.004, 0.0, 0.0).finished();
   const bool holding =
-    tracker.update(&target, measured, 0.0, kCycleSeconds, positions, velocities);
+    tracker.update(&target, measured, 0.0, true, kCycleSeconds, positions, velocities);
 
   EXPECT_FALSE(holding);
   EXPECT_TRUE(positions.isApprox(target));
@@ -78,7 +78,7 @@ TEST(ForwardCommand, ClampsTheVelocityCeiling)
   // position still goes to the setpoint: on this firmware the velocity is the
   // slew ceiling of the reference, not a filter on the command.
   const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.1).finished();
-  tracker.update(&target, measured, 0.0, kCycleSeconds, positions, velocities);
+  tracker.update(&target, measured, 0.0, true, kCycleSeconds, positions, velocities);
 
   EXPECT_NEAR(positions(0), 0.1, 1e-12);
   EXPECT_NEAR(velocities(0), 0.5, 1e-12);
@@ -94,7 +94,7 @@ TEST(ForwardCommand, GoesStaleAndHolds)
   Eigen::VectorXd velocities = Eigen::VectorXd::Zero(1);
 
   const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.05).finished();
-  tracker.update(&target, measured, 0.0, kCycleSeconds, positions, velocities);
+  tracker.update(&target, measured, 0.0, true, kCycleSeconds, positions, velocities);
   EXPECT_NEAR(positions(0), 0.05, 1e-12);
 
   // The publisher died. Past the timeout the output must be a hold, and the
@@ -102,7 +102,7 @@ TEST(ForwardCommand, GoesStaleAndHolds)
   // velocity with a stale position is exactly how an arm walks away.
   const Eigen::VectorXd now_measured = (Eigen::VectorXd(1) << 0.048).finished();
   const bool holding =
-    tracker.update(&target, now_measured, 0.25, kCycleSeconds, positions, velocities);
+    tracker.update(&target, now_measured, 0.25, true, kCycleSeconds, positions, velocities);
 
   EXPECT_TRUE(holding);
   EXPECT_TRUE(positions.isApprox(now_measured));
@@ -120,7 +120,7 @@ TEST(ForwardCommand, RejectsAWrongSizedSetpoint)
 
   const Eigen::VectorXd wrong_size = Eigen::VectorXd::Zero(2);
   const bool holding =
-    tracker.update(&wrong_size, measured, 0.0, kCycleSeconds, positions, velocities);
+    tracker.update(&wrong_size, measured, 0.0, true, kCycleSeconds, positions, velocities);
 
   EXPECT_TRUE(holding);
   EXPECT_TRUE(positions.isApprox(measured));
@@ -137,7 +137,7 @@ TEST(ForwardCommand, ZeroTimeoutDisablesTheStalenessTest)
 
   const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.01).finished();
   const bool holding =
-    tracker.update(&target, measured, 1000.0, kCycleSeconds, positions, velocities);
+    tracker.update(&target, measured, 1000.0, true, kCycleSeconds, positions, velocities);
 
   // A very old command is still followed when the test is switched off. That is
   // the documented consequence of setting the timeout to zero.
@@ -161,14 +161,48 @@ TEST(ForwardCommand, VelocityIsTheStepOverTheIntervalItHappenedOver)
 
   ForwardCommandTracker slow_stream = makeTracker(1.0, 0.2);
   slow_stream.reset(measured);
-  slow_stream.update(&target, measured, 0.0, 0.043, positions, velocities);
+  slow_stream.update(&target, measured, 0.0, true, 0.043, positions, velocities);
   EXPECT_NEAR(velocities(0), 0.02 / 0.043, 1e-9);
   EXPECT_LT(velocities(0), 1.0);
 
   ForwardCommandTracker fast_stream = makeTracker(1.0, 0.2);
   fast_stream.reset(measured);
-  fast_stream.update(&target, measured, 0.0, kCycleSeconds, positions, velocities);
+  fast_stream.update(&target, measured, 0.0, true, kCycleSeconds, positions, velocities);
   EXPECT_NEAR(velocities(0), 1.0, 1e-9);  // 2.0 rad/s, clipped by the ceiling
+}
+
+/// The velocity is a property of the step, and the step belongs to one cycle.
+///
+/// This is the difference between a slew ceiling and a sawtooth. The controller
+/// runs at 100 Hz and the command stream does not, so most cycles have no arrival
+/// in them; recomputing the velocity on those cycles puts zero in the field, and
+/// the firmware advances the position reference at the ceiling it is given. A
+/// field that is zero half the time is therefore an arm that moves half as far as
+/// it was told to, and a velocity plot of a teleoperation session shows a band of
+/// spikes where it should show a curve.
+TEST(ForwardCommand, HoldsTheVelocityBetweenCommandArrivals)
+{
+  const Eigen::VectorXd measured = Eigen::VectorXd::Zero(1);
+  const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.02).finished();
+  Eigen::VectorXd positions = Eigen::VectorXd::Zero(1);
+  Eigen::VectorXd velocities = Eigen::VectorXd::Zero(1);
+
+  ForwardCommandTracker tracker = makeTracker(1.0, 0.2);
+  tracker.reset(measured);
+  tracker.update(&target, measured, 0.0, true, 0.02, positions, velocities);
+  const double requested = velocities(0);
+  EXPECT_NEAR(requested, 1.0, 1e-9);   // 0.02 rad over 20 ms is the ceiling
+
+  // Four cycles with nothing new arriving: same setpoint, same ceiling, no zero.
+  for (int cycle = 0; cycle < 4; ++cycle) {
+    positions.setZero();
+    velocities.setZero();
+    const bool holding = tracker.update(
+      &target, measured, kCycleSeconds, false, kCycleSeconds, positions, velocities);
+    EXPECT_FALSE(holding);
+    EXPECT_DOUBLE_EQ(velocities(0), requested);
+    EXPECT_DOUBLE_EQ(positions(0), target(0));
+  }
 }
 
 }  // namespace
