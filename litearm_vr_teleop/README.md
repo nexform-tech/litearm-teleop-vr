@@ -192,6 +192,50 @@ rate with no permanent offset. Tune `max_joint_acceleration` first: it is the
 number the operator feels. A lower `max_joint_jerk` is not "smoother" - it also
 delays the deceleration, which makes the arm overshoot instead of approaching.
 
+### Where the solve runs, and what the stream is made of
+
+Inverse kinematics runs on its own thread and hands its latest solution to the
+publishing timer through a single slot. The timer produces the command stream at
+its configured rate from whatever is in that slot, and the joint filter and rate
+limiter interpolate between solutions. This is what makes the stream independent
+of the solver: with the plugin backend on the reference machine a solve takes
+tens of milliseconds, and while it ran on the control path the command stream
+inherited that period. On mock hardware, where the state mirrors the command,
+that is visible as a staircase in a position plot - flat, step, flat - and the
+arm looks like it moves in jumps rather than continuously.
+
+One slot, deliberately, not a queue: a queue would trade latency for smoothness,
+and teleoperation cannot pay that. A slow solve now delays the target by its own
+duration and nothing else. The transitions in and out of following are signalled
+to the solver by a generation counter, so the mapper - which is not thread safe
+and belongs to the solver - is only ever started and reset by the thread that
+uses it.
+
+### Near a singularity the solve is damped
+
+The configured plugin's answer stops being a function of the target when the
+Jacobian is ill conditioned. Measured on this arm at a wrist that is nearly
+straight: a minimum singular value of 0.028, and a few millimetres of hand motion
+move a joint by hundreds of milliradians - with the arm as likely to go up as
+down, so an operator finds a direction they cannot command, and the node's own
+warning reports the target as unreachable.
+
+`damping_singular_value` (0.05 by default, 0 disables) is the threshold below
+which the damped least squares backend answers instead, whatever `ik_backend`
+names. A damped solve stays continuous through the same region; it says so in the
+log, because the residual it accepts there is larger. Filtering cannot fix this:
+a filter can only make a wrong direction slower.
+
+### The command stream has to be able to move both ways
+
+The rate limiter works its speed limit out in the frame of "towards the target",
+because the limit is a distance and a distance has no sign. The acceleration that
+comes out of that has to be turned back into the joint's own frame before it is
+applied. Doing it the other way round produces a limiter that only ever moves one
+way: a joint whose target is below it is told to accelerate upwards, the step
+guard refuses the step, and the target is never reached. Two tests pin this down,
+one for each direction, and one for a reversal through zero.
+
 ### The tracking ratio, and the one switch that changes it
 
 The mapping is velocity form and re-bases its target on the measured pose every

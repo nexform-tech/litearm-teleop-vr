@@ -396,28 +396,22 @@ Eigen::VectorXd JointRateLimiter::apply(
     // than max_jerk. The second is what makes the speed curve an S rather than a
     // ramp, so a joint starts and stops softly instead of asking the firmware
     // for a step in speed.
-    const double wanted_acceleration = std::max(
+    const double wanted_toward = std::max(
       -limits_.max_acceleration,
       std::min(limits_.max_acceleration, speed_gain_ * (speed_limit - velocity_toward)));
+    // The speed limit is a distance, so it is worked out in the frame of the
+    // distance: "towards the target" is always the positive direction there. The
+    // acceleration has to be turned back into the joint's own frame before it is
+    // applied, or the limiter only ever moves one way - a joint whose target is
+    // below it would be told to accelerate upwards, the guard below would refuse
+    // the step, and the arm would sit still while every target on the other side
+    // of it was ignored.
+    const double wanted_acceleration = sign * wanted_toward;
     acceleration_(i) = std::max(
       acceleration_(i) - acceleration_step,
       std::min(acceleration_(i) + acceleration_step, wanted_acceleration));
     velocity_(i) = std::max(
       -limits_.max_velocity, std::min(limits_.max_velocity, velocity_(i) + acceleration_(i) * safe_dt));
-
-    // A joint never asks to move away from its target, and while the distance
-    // left is short enough that the deceleration outweighs it, it is held at
-    // rest with its acceleration pointing back towards the target. Without this
-    // the state can go the wrong way, the guard below then refuses the step, and
-    // the joint stands still while the limiter spends the acceleration ramp
-    // coming back - a stall of a fifth of a second in the middle of a move.
-    if (remaining(i) >= 0.0) {
-      velocity_(i) = std::max(0.0, velocity_(i));
-      acceleration_(i) = std::max(0.0, acceleration_(i));
-    } else {
-      velocity_(i) = std::min(0.0, velocity_(i));
-      acceleration_(i) = std::min(0.0, acceleration_(i));
-    }
   }
 
   // The final guard: never step past the target, in either direction. The speed

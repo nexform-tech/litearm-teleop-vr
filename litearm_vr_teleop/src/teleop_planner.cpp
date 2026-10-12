@@ -306,6 +306,12 @@ void TeleopPlanner::measure(
   rotation_residual = toRotationVector(rotation.transpose() * reached_rotation).norm();
 }
 
+TeleopPlanner::Solution TeleopPlanner::solveDamped(
+  const Eigen::Vector3d & position, const Eigen::Matrix3d & rotation, const Eigen::VectorXd & seed)
+{
+  return solveWithDls(position, rotation, seed);
+}
+
 double TeleopPlanner::minimumSingularValue(const Eigen::VectorXd & joints)
 {
   if (joints.size() != static_cast<Eigen::Index>(joint_names_.size())) {

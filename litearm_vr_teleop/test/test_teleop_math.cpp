@@ -625,5 +625,71 @@ TEST(JointRateLimiter, RefusesATargetForADifferentNumberOfJoints)
   EXPECT_TRUE(limiter.apply(wrong_size, current, 0.01).isApprox(current));
 }
 
+/// The limiter works its speed limit out in the frame of "towards the target",
+/// because the limit is a distance and a distance has no sign. The acceleration
+/// has to be turned back into the joint's frame before it is applied. Getting
+/// that wrong is a limiter that only ever moves one way: a joint whose target is
+/// below it is told to accelerate upwards, the step guard refuses the step, and
+/// the arm sits still. This is the test that catches it.
+TEST(JointRateLimiter, MovesTowardsATargetBelowItJustAsWellAsAboveIt)
+{
+  JointRateLimits limits;
+  limits.max_velocity = 2.0;
+  limits.max_acceleration = 20.0;
+  limits.max_jerk = 1000.0;
+  JointRateLimiter limiter(limits, 1);
+
+  const double dt = 0.01;
+  const Eigen::VectorXd target = (Eigen::VectorXd(1) << -0.3).finished();
+  Eigen::VectorXd current = Eigen::VectorXd::Zero(1);
+
+  double previous_velocity = 0.0;
+  double previous_acceleration = 0.0;
+  for (int cycle = 0; cycle < 200; ++cycle) {
+    const Eigen::VectorXd next = limiter.apply(target, current, dt);
+    const double velocity = (next(0) - current(0)) / dt;
+    const double acceleration = (velocity - previous_velocity) / dt;
+    EXPECT_LE(std::abs(velocity), limits.max_velocity + 1e-9);
+    EXPECT_LE(std::abs(acceleration), limits.max_acceleration + 1e-9);
+    EXPECT_LE(std::abs(acceleration - previous_acceleration), limits.max_jerk * dt + 1e-9);
+    // Monotone towards the target, in the negative direction.
+    EXPECT_LE(next(0), current(0));
+    EXPECT_GE(next(0), target(0) - 1e-12);
+    previous_velocity = velocity;
+    previous_acceleration = acceleration;
+    current = next;
+  }
+  EXPECT_NEAR(current(0), target(0), 1e-6);
+}
+
+/// A reversal: the operator moves one way, then the other, and the target ends
+/// up behind the arm. The command has to come back through zero and go the other
+/// way, smoothly, instead of stalling where it is.
+TEST(JointRateLimiter, ReversesThroughZeroWithoutStalling)
+{
+  JointRateLimits limits;
+  JointRateLimiter limiter(limits, 1);
+
+  const double dt = 0.01;
+  Eigen::VectorXd current = Eigen::VectorXd::Zero(1);
+  Eigen::VectorXd target = Eigen::VectorXd::Zero(1);
+  for (int cycle = 0; cycle < 50; ++cycle) {          // up
+    target(0) = 0.2;
+    current = limiter.apply(target, current, dt);
+  }
+  EXPECT_NEAR(current(0), 0.2, 1e-6);
+
+  double previous = current(0);
+  for (int cycle = 0; cycle < 200; ++cycle) {         // and back down, past zero
+    target(0) = -0.2;
+    current = limiter.apply(target, current, dt);
+    // Never moves away from the target, in either direction.
+    const double towards = (target(0) - previous) >= 0.0 ? 1.0 : -1.0;
+    EXPECT_GE((current(0) - previous) * towards, -1e-12);
+    previous = current(0);
+  }
+  EXPECT_NEAR(current(0), -0.2, 1e-6);
+}
+
 }  // namespace
 }  // namespace litearm_vr_teleop

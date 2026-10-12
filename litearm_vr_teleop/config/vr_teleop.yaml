@@ -51,6 +51,14 @@ vr_teleop:
     #           MoveIt core's forward kinematics and Jacobian. Predictable
     #           latency, which is what a following task wants.
     ik_backend: plugin
+
+    # 当雅可比的最小奇异值低于这个数时，改用本包的阻尼最小二乘后端求解（0 = 关闭）。
+    #
+    # 插件后端（SNS）在奇异位形附近解不再是目标的连续函数：手的几毫米位移可以让某个
+    # 关节跳半弧度，往上往下概率相当 —— 操作员会发现某个方向"压不下去"。阻尼后端在同
+    # 一片区域里是连续的，代价是它接受的残差更大，所以每次切换都会打一条 WARN。
+    # 这里判定用的是"种子点"处的奇异值，与求解用的种子一致。
+    damping_singular_value: 0.05
     group_name: litearm_arm
     base_frame: base_link
     tip_link: ee_link
