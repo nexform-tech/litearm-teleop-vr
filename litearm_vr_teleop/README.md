@@ -247,7 +247,16 @@ mock hardware (no lag) a 12 cm hand move delivers about 60 percent; the sim
 launch's own documentation quotes about a quarter. An operator experiences that
 as "I have to move my hand a long way before the arm does anything".
 
-`reference_pose: commanded` accumulates on the last commanded pose instead, so
+`reference_pose` defaults to `commanded`, which accumulates on the last commanded
+pose instead of rebuilding the target from where the arm is. The reason is a
+measurement: in `measured` mode the solver's residual - a few tenths of a
+millimetre, ordinary for an iterative solver - is fed back into the next frame's
+target through the arm's own pose, and that loop has no damping in it. With a hand
+held still on the mock hardware every joint oscillated peak to peak by 0.6 to 3.7
+mrad and changed direction on nearly every frame, which is the regular sawtooth a
+position plot shows. On the commanded pose the same measurement is 0.00000 rad.
+
+It accumulates on the last commanded pose instead, so
 the arm's shortfall is carried and delivered as soon as the arm can take it, and
 `max_target_lead_m` / `max_target_lead_rad` bound how far ahead the target may
 run. It ships **off**: restoring the tracking ratio is a decision to make after

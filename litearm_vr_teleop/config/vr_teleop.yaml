@@ -123,12 +123,25 @@ vr_teleop:
     #              experiences that as "I have to move my hand a long way before
     #              the arm does anything".
     #
-    # `commanded` is a decision to make after measuring on the hardware rather
-    # than before, so it ships off. With it on, the target can collect motion the
-    # arm cannot reach, which is what `max_target_lead_m` / `_rad` bound: beyond
-    # that lead the target is pulled back onto it, keeping the direction the
-    # operator asked for.
-    reference_pose: measured
+    # `commanded` is the default, and the reason is a measurement rather than a
+    # preference. In `measured` mode the target is rebuilt every frame from the
+    # pose the arm is actually in, and on this stack the arm's pose follows the
+    # command - so the residual of the inverse kinematics (a few tenths of a
+    # millimetre, which is ordinary for an iterative solver) is fed back into the
+    # next frame's target. That closes a loop with no damping in it: measured on
+    # the mock hardware with the operator's hand held still, every joint stood
+    # there oscillating peak to peak by 0.6 to 3.7 mrad, changing direction on
+    # nearly every frame, which is the sawtooth a position plot shows as a
+    # regular ripple. With the reference on the commanded pose the same
+    # measurement is 0.00000 rad on every joint: the target no longer contains
+    # the solver's residual, and the operator's own motion accumulates instead.
+    #
+    # The cost is the mirror image of the benefit: with it on, the target can
+    # collect motion the arm has not delivered yet. That is exactly what
+    # `max_target_lead_m` / `_rad` bound - beyond that lead the target is pulled
+    # back onto the arm, keeping the direction the operator asked for - and the
+    # grip release clears it. Use `measured` if the arm must never collect any.
+    reference_pose: commanded
     max_target_lead_m: 0.15
     max_target_lead_rad: 0.6
 

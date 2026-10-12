@@ -75,7 +75,7 @@ are worth knowing before a session:
 | Parameter | Default | What it decides |
 | --- | --- | --- |
 | `rotation_mode` | `world` | Whether the tool copies the controller's rotation in the world (`world`) or axis for axis in its own frame (`tool`, the previous behaviour). Settable while the node runs. |
-| `reference_pose` | `measured` | Whether the hand's increment is measured against the measured pose (no accumulation) or against the last commanded pose, which delivers the operator's whole displacement even while the arm lags. `commanded` is a decision to make on hardware. |
+| `reference_pose` | `commanded` | Whether the hand's increment is measured against the measured pose (each frame rebuilt from where the arm is, which feeds the solver's own residual back into the target and makes a still hand oscillate) or against the last commanded pose, which is the default: no residual in the loop, and the operator's whole displacement is delivered even while the arm lags, bounded by the lead cap. |
 | `control_rate_hz` | `100.0` | The rate the node aims for. It does not reach it while it solves inverse kinematics per command: about 23 Hz was measured on the reference machine, which is why every `dt`-scaled limit in the config is worth checking against `ros2 topic hz /vr_forward_controller/commands`. |
 
 ## Tests
