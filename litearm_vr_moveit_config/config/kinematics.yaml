@@ -1,0 +1,37 @@
+# kinematics.yaml — MoveIt 逆运动学求解器配置。
+#
+# 求解器选择
+# ----------
+# 用 **KDL**：MoveIt 自带（kdl_kinematics_plugin），装了 moveit_core 就有，不需要
+# 工作区里再放任何插件包。之前这里选的是 SNS-IK；插件包不在工作区时，MoveIt 只会
+# 报一句
+#   "Kinematics solver could not be instantiated for joint group litearm_arm"
+# 而规划能力静默降级，所以默认回到自带求解器。
+#
+# ⚠ KDL 的短板（本臂实测，不是传闻）：
+#   同一个几何上可达的位姿，4 个种子（上一帧解 / 当前状态 / 全零 / 限位中点）各试
+#   一遍、705 ms 内可能**全部无解**，而 SNS-IK 解得出来。KDL 解不出来时 OMPL 的
+#   goal tree 采不到样本，整条任务只报 GOAL_STATE_INVALID —— 表现为间歇性规划失败，
+#   而不是"位姿不可达"。
+#
+# 想换回 SNS-IK（命中率更高，代价是工作区要多两个包）：
+#   1. 把 `sns_ik_lib` 与 `sns_ik_kinematics_plugin` 放进工作区并 colcon build；
+#   2. 把下面的 kinematics_solver 改成
+#        sns_ik_kinematics_plugin::SnsIkKinematicsPlugin
+#      ⚠ 必须是 `::` 形式，且逐字等于插件描述 XML 里的 `type` —— pluginlib 按 XML
+#      建表、不做归一化，写成斜杠形式会报 "no factory exists for it"（看着像库没编出来）；
+#   3. 加上插件自己读的参数：solver_type: SNS、loop_period: 0.005、eps: 1e-5、
+#      timeout: 0.2（名字见插件的 initialize()）。
+#   两者的命中率对比（俯视/侧向各 12 次）记录在 README 的「会自己生成的配置」之前
+#   那一节，改之前先看一遍。
+#
+# 参数说明
+# --------
+# kinematics_solver_timeout / attempts 是 **MoveIt 侧**的预算与重试次数。KDL 是迭代
+# 数值解，实测经常用满预算而不是提前收敛，所以给 0.2 s 留余量，而不是上游示例里的
+# 0.005 s。
+litearm_arm:
+  kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+  kinematics_solver_search_resolution: 0.005
+  kinematics_solver_timeout: 0.2
+  kinematics_solver_attempts: 3

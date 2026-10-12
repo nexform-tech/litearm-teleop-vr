@@ -1,0 +1,202 @@
+# vr_teleop.yaml - parameters for the two nodes this stack starts.
+#
+# Note that neither node decides how fast the arm may move. That belongs to the
+# controller (max_velocity in vr_controllers.yaml) and to the firmware, so a
+# mistake in this file cannot raise the speed limit of the hardware.
+
+headset_link:
+  ros__parameters:
+    # 0.0.0.0 because the headset is a separate device on the local network; it
+    # connects to ws://<this machine>:8765. A genuine network exposure, so it is
+    # stated here rather than buried: the link accepts frames from anything that
+    # can reach the port. Bind 127.0.0.1 to require a tunnel.
+    host: 0.0.0.0
+    port: 8765
+    frame_topic: /vr_controller_frame
+    # How often to say whether frames are arriving. A headset that is connected
+    # but silent is the most confusing failure of a link like this, and it is
+    # indistinguishable from an arm that has stopped following for other reasons.
+    report_period_s: 10.0
+
+vr_teleop:
+  ros__parameters:
+    frame_topic: /vr_controller_frame
+    joint_state_topic: /joint_states
+    command_topic: /vr_forward_controller/commands
+
+    # The control loop runs at this rate regardless of the headset's rate. Between
+    # two headset frames it keeps solving against the same absolute target, which
+    # is idempotent, so a rate above the headset's is not wasted work and a rate
+    # below it does not lose motion.
+    control_rate_hz: 100.0
+
+    joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
+
+    # The teleoperation start pose, in radians. These are the `grasp_ready`
+    # values in litearm_vr_moveit_config/srdf/litearm_vr.srdf.xacro; the SRDF
+    # makes the pose nameable for MoveIt, this makes it reachable without a
+    # planner. The two copies have to move together.
+    start_pose: [0.0, -0.645772, 0.0, -1.989675, 0.0, -0.837758, 0.0]
+    # A quarter of the arm's rated joint speed. This move happens before the
+    # operator is following anything, so it is the one motion nobody is watching.
+    start_pose_speed: 0.5
+    start_pose_accel: 3.0
+
+    # Which inverse kinematics backend. Both are implemented and either can be
+    # selected at any time; see the class documentation in teleop_planner.hpp.
+    #   plugin  the solver named below, loaded through pluginlib. Reuses the
+    #           MoveIt configuration, at the cost of a latency this node does not
+    #           control (the configuration budgets 0.2 s per call).
+    #   dls     damped least squares implemented in this package, on top of the
+    #           MoveIt core's forward kinematics and Jacobian. Predictable
+    #           latency, which is what a following task wants.
+    ik_backend: plugin
+    group_name: litearm_arm
+    base_frame: base_link
+    tip_link: ee_link
+
+    # Acceptance of a solution, measured by running forward kinematics on it. A
+    # solution outside this is treated as no solution and the arm holds. Ported
+    # from the reference implementation: 3 mm and 0.05 rad.
+    ik_position_tolerance: 0.003
+    ik_rotation_tolerance: 0.05
+
+    # Damped least squares, used only when ik_backend is dls.
+    dls_damping: 0.05
+    dls_null_space_gain: 0.2
+    dls_max_iterations: 120
+    dls_max_step_rad: 0.2
+
+    # Only used for logging: a Jacobian minimum singular value below this is
+    # reported so that an unreachable target can be attributed to conditioning
+    # rather than to geometry.
+    singularity_warning_threshold: 0.02
+
+    # Increment mapping and joint filter, ported from the reference.
+    # max_step_rad is the absolute ceiling on one cycle's joint step, the floor
+    # under an inverse kinematics jump; max_joint_velocity is the normal rate
+    # limit; low_pass_tau removes the high frequency part that headset tracking
+    # noise contributes after the solver amplifies it.
+    max_step_rad: 0.08
+    max_joint_velocity: 2.0
+    low_pass_tau: 0.02
+    moving_average_frames: 10
+
+    # What the hand's increment is measured against.
+    #
+    #   measured   the pose forward kinematics reports, so every frame starts
+    #              from where the arm actually is. A target the arm did not
+    #              reach is dropped rather than carried, which is why nothing
+    #              accumulates - including the operator's motion while the arm
+    #              lags. This is the behaviour so far.
+    #   commanded  the last commanded pose, so the arm's shortfall is carried
+    #              into the next frame and delivered as soon as the arm can take
+    #              it. This is what restores the tracking ratio on a plant that
+    #              lags: on the fake firmware the end effector otherwise delivers
+    #              a small fraction of the hand's motion, and the operator
+    #              experiences that as "I have to move my hand a long way before
+    #              the arm does anything".
+    #
+    # `commanded` is a decision to make after measuring on the hardware rather
+    # than before, so it ships off. With it on, the target can collect motion the
+    # arm cannot reach, which is what `max_target_lead_m` / `_rad` bound: beyond
+    # that lead the target is pulled back onto it, keeping the direction the
+    # operator asked for.
+    reference_pose: measured
+    max_target_lead_m: 0.15
+    max_target_lead_rad: 0.6
+
+    # Smallest target change worth re-solving the inverse kinematics for:
+    # 0.5 mm and 0.5 mrad are below anything an operator asks for, and a
+    # stationary controller's tracking noise sits below them. Zero disables both.
+    #
+    # Read the cost before raising them in the `measured` mode: an increment
+    # below the deadband is not accumulated, it is dropped, so the deadband acts
+    # as a velocity threshold of deadband / frame period (0.5 mm at 72 Hz is
+    # 3.6 cm/s). That is why both default to zero. With `reference_pose:
+    # commanded` the increments do accumulate and a deadband of a few tenths of
+    # a millimetre is safe and useful.
+    target_deadband_m: 0.0
+    target_deadband_rad: 0.0
+
+    # How the controller's rotation reaches the tool.
+    #
+    #   world  the tool turns about the same world axis the controller turned
+    #          about, by the same angle. This is what "the gripper follows my
+    #          hand" means to an operator, and it holds at every arm pose.
+    #   tool   the tool copies the hand axis for axis, in the tool's own frame.
+    #          This is the previous behaviour. It is the same motion as `world`
+    #          only while the tool's frame and the controller's frame stand in
+    #          one particular relation - which the measured baseline below was
+    #          taken at, and which any other wrist roll breaks. At the start
+    #          pose, whose wrist roll is about 95 degrees from that one, an
+    #          operator turning the controller saw the arm answer in a rotated
+    #          direction.
+    #
+    # `world` needs no calibration and is the default. `tool` is kept because a
+    # rig that was calibrated for it can ask for it back.
+    rotation_mode: world
+
+    # Per axis sign on the rotation increment, applied on top of the mode's own
+    # baseline: nothing in `world` (the geometry is already right), the measured
+    # [1, -1, -1] in `tool`. All ones therefore means "leave this mode as
+    # measured", which is what makes switching modes live give the other
+    # measured behaviour rather than a mode with a sign missing.
+    #
+    # The signs are applied in the frame the mode reads in: robot base axes for
+    # `world`, tool axes for `tool`. They exist for what geometry cannot fix: a
+    # headset frame that is mirrored, or a controller habitually held upside
+    # down.
+    #
+    # Both parameters are live. The person who can tell whether a sign is right
+    # is the one holding the controller, so they can be changed without
+    # restarting anything, and the change takes effect on the next frame:
+    #
+    #   ros2 param set /vr_teleop rotation_signs "[1.0, 1.0, -1.0]"
+    #   ros2 param set /vr_teleop rotation_mode tool
+    #
+    # A change takes effect on the next headset frame; until then the arm holds
+    # the pose it had.
+    rotation_signs: [1.0, 1.0, 1.0]
+
+    # Freeze when the headset goes quiet. Deliberately much shorter than the
+    # controller's own staleness timeout: this node knows more than the controller
+    # does (it knows a link exists and how old the last frame is), so the
+    # fast, informed decision belongs here.
+    headset_timeout_s: 0.5
+
+    gripper_enabled: true
+    gripper_action: /gripper_controller/gripper_cmd
+    # 0.07479 m is the widest opening the gripper's driver red lines allow. The
+    # mechanism travels to 0.087 m but the driver clamps anything above 0.07479,
+    # and because a stalled gripper counts as success the clamp would be silent:
+    # asking for 0.087 would just open 12.2 mm less than requested, with nothing
+    # reported.
+    gripper_open_position: 0.07479
+    gripper_close_position: 0.0
+    gripper_max_effort: 3.5
+
+    # Trigger analogue threshold, debounce, and a floor on how long a close lasts.
+    # Operators release the trigger while the fingers are still travelling; without
+    # the floor the gripper would reopen before it had a chance to hold anything.
+    trigger_threshold: 0.5
+    trigger_debounce_s: 0.05
+    min_close_s: 0.5
+
+    # The solver, and where it reads its own tuning. The plugin looks for
+    #   <group_name>.kinematics_solver   for its class, and
+    #   <group_name>.solver_type / loop_period / eps / timeout   for its behaviour.
+    #
+    # These five values are the same ones as in
+    # litearm_vr_moveit_config/config/kinematics.yaml. They are repeated here
+    # rather than read from there because a MoveIt kinematics file has no node
+    # name at its top level and cannot be handed to a node as a parameter file;
+    # wrapping it would be a copy with a file in between. The duplication is
+    # guarded by test/test_kinematics_consistency.py, which fails if the two
+    # drift apart.
+    litearm_arm:
+      kinematics_solver: sns_ik_kinematics_plugin::SnsIkKinematicsPlugin
+      solver_type: SNS
+      loop_period: 0.005
+      eps: 1.0e-5
+      timeout: 0.2

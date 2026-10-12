@@ -1,0 +1,169 @@
+# RViz layout for the LiteArm VR teleoperation stack.
+#
+# Launched by litearm_vr_teleop/launch/teleop_stack.launch.xml as
+# `rviz2 -d <this file>`. That launch node is given exactly two parameters,
+# `robot_description` and `robot_description_semantic`, and the stack it belongs
+# to starts no move_group, no planner and no camera node. A display may therefore
+# rely only on the model published on the latched /robot_description topic and on
+# the TF tree; anything reaching for a kinematics parameter, a planning
+# scene, or a topic this stack does not publish would sit empty (or fail to load)
+# in the panel without anything explaining why.
+#
+# Removed from the layout that this file was originally copied from (the arm
+# stack's MoveIt layout), for the reasons above:
+#   * the MoveIt planning panel - it reads a kinematics solver parameter
+#     that this launch node is never given and a planning scene that nobody
+#     publishes. This stack plans inside vr_teleop_node instead, so the panel
+#     would have opened empty and asked for configuration it cannot be given.
+#   * the camera point cloud display, the camera image display and the vision
+#     target pose display - this robot has no camera and this stack runs no
+#     vision node, so all three would have waited on topics that never appear.
+#
+# Durability of the robot description
+# -----------------------------------
+# The RobotModel display subscribes with Transient Local because
+# robot_state_publisher publishes /robot_description as a latched
+# (transient_local) topic. A Volatile subscription here would receive nothing
+# when RViz starts after robot_state_publisher, which shows up as "RViz is up but
+# there is no robot".
+#
+# Plugin class names
+# ------------------
+# Every Class named below has to exist in the plugin description of this
+# installation. A typo does not stop RViz from starting: it logs
+# "The plugin for class '...' failed to load" and silently skips that display, so
+# the mistake looks like a missing feature rather than like a bad configuration.
+# The classes in use here can be listed with:
+#   python3 -c "import xml.etree.ElementTree as ET, os, glob; \
+#     [print(c.get('name')) for prefix in os.environ['AMENT_PREFIX_PATH'].split(':') \
+#      for p in glob.glob(prefix + '/share/*/*plugin*.xml') \
+#      for c in ET.parse(p).getroot().iter('class')]"
+#
+# Window layout
+# -------------
+# No QMainWindow State is written here. The one inherited from the MoveIt layout
+# encoded a dock arrangement built around the planning panels, which no
+# longer exist, so RViz is left to arrange the panels listed below itself.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /RobotModel1
+        - /TF1
+  - Class: rviz_common/Help
+    Name: Help
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    # Ground plane of the fixed frame: 20 cells of 1 m, so the arm and the reach
+    # of its 7 axes both stay inside the grid.
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+    # The arm and gripper geometry, straight from the latched description topic.
+    - Class: rviz_default_plugins/RobotModel
+      Alpha: 1
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Name: RobotModel
+      Visual Enabled: true
+      Value: true
+    # The world axes at base_link. The grid says where the ground is; this says
+    # which way base_link's X and Y point, which the grid alone does not.
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Length: 0.4
+      Name: Axes
+      Radius: 0.02
+      Reference Frame: <Fixed Frame>
+      Value: true
+    # The TF tree. Arrows off and marker scale small: with the arm's chain of
+    # frames the arrows overlap the model and hide it.
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+      Marker Scale: 0.3
+      Name: TF
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.6
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.0
+        Y: 0.0
+        Z: 0.35
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.35
+      Target Frame: base_link
+      Yaw: -0.8
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 975
+  Help:
+    collapsed: false
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Views:
+    collapsed: false
+  Width: 1200

@@ -1,0 +1,337 @@
+<?xml version="1.0"?>
+<!--
+  litearm_vr.urdf.xacro — merged robot description for the VR teleoperation stack.
+
+  What this file describes
+  ========================
+  One robot: the 7 axis LiteArm arm plus the real LiteGrip gripper. The arm
+  kinematics and the arm ros2_control block come from litearm_ros2_control; the
+  gripper kinematics are restated in this file and the gripper ros2_control
+  block comes from litegrip_ros2_control.
+
+  Why the gripper geometry is restated rather than included
+  ========================================================
+  The upstream gripper description (litegrip_description) names its own root link
+  base_link, which is also the arm's root link name, and one URDF may not carry
+  two links with the same name. The gripper links therefore take a gripper_
+  prefix here and point at the upstream meshes directly through
+  package://litegrip_description/meshes (the meshes themselves are not copied).
+
+  The numbers below are byte for byte the numbers of litearm_manipulation's
+  urdf/litearm_gripper.urdf.xacro. That file and this one describe the same
+  mechanism; changing one without the other makes the two stacks disagree about
+  where the fingers are.
+
+  Opening convention
+  ==================
+  gripper_opening_joint is the only commandable gripper joint and its value is
+  the opening in metres. The two fingers (gripper_slide_joint_left/right) are
+  its mimic and have no independent command port, because a real gripper has a
+  single transmission:
+
+      q = 0        fully closed (the two inner faces meet at x = 0)
+      q = 0.07479  widest commandable opening, set by the driver red line
+
+  The mechanical travel is 0.087 m and is deliberately NOT written into the
+  joint limit. The driver clamps anything above 74.79 mm, and because
+  allow_stalling is true the controller then reports "position held" as success
+  (reached_goal=false, stalled=true, action status SUCCEEDED), so an
+  unreachable target fails silently instead of raising an error. MoveIt takes
+  its joint limit from this file, so the limit has to be the commandable range.
+
+  Camera
+  ======
+  The reference overlay this file derives from carries an optional eye in hand
+  camera block. This robot has no camera, so that subtree is absent here: no
+  camera_body_link, no camera_mount_joint, no camera_collision argument and no
+  camera size properties.
+
+  Hardware selection
+  ==================
+  use_mock_hardware=false (default) loads the two real hardware components, one
+  per ros2_control block. use_mock_hardware=true replaces both with a single
+  mock_components/GenericSystem block so that the configuration can be exercised
+  without the arm or the gripper attached.
+-->
+<robot name="litearm" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Selects the hardware blocks at the bottom of this file. -->
+  <xacro:arg name="use_mock_hardware" default="false"/>
+
+  <!-- ── The bare arm description, by path ───────────────────────────────────
+       Mock hardware mode needs the arm's links and joints WITHOUT any
+       ros2_control block, because it replaces the hardware and must not inherit
+       the real one. The real mode gets the same description the other way, from
+       the wrapper below, so this argument is only used by the mock mode.
+
+       It is a PATH and not a package name because xacro cannot compose one:
+       `$(find ...)` takes a literal, and it does not substitute `$(arg ...)` or
+       `${...}` inside its own argument (both were tried and both fail). The
+       launch file therefore passes the resolved path.
+
+       The description package is `litearm_description` and it is detected at
+       build time by this package's CMakeLists, which records it in
+       config/arm_description_package.txt for the launch files to read. The
+       default below only applies when the file is expanded by hand with no
+       launch file involved. -->
+  <xacro:arg name="arm_description_xacro" default="$(find litearm_description)/urdf/litearm_description.urdf"/>
+
+  <!-- ── arm description and hardware ────────────────────────────────────────
+       Real hardware: litearm_ros2_control's wrapper brings the arm kinematics
+       AND the LitearmSystem ros2_control block; litegrip_ros2_control brings the
+       LitegripSystem ros2_control block. Two blocks, each one hardware
+       component, both loaded by the same controller_manager. -->
+  <xacro:if value="$(arg use_mock_hardware)">
+    <xacro:include filename="$(arg arm_description_xacro)"/>
+  </xacro:if>
+  <xacro:unless value="$(arg use_mock_hardware)">
+    <xacro:include filename="$(find litearm_ros2_control)/urdf/litearm.urdf.xacro"/>
+    <xacro:include filename="$(find litegrip_ros2_control)/urdf/litegrip.ros2_control.xacro"/>
+  </xacro:unless>
+
+  <!-- ── gripper geometry parameters ─────────────────────────────────────────
+       Same values as litegrip_description/urdf/litegrip_description.urdf.xacro, including the
+       finger Z span 0.0205 to 0.1125 taken from the bounding box of
+       meshes/gripper_slider_link*.STL and the joint origins. -->
+  <xacro:property name="grip_mount_z" value="0.0641"/>       <!-- ee_link to gripper bottom face (mounting block contact) -->
+  <!-- Mounting yaw about the mounting face normal, which is the approach axis
+       (TCP +Z). It turns only the finger opening direction (ee_link +/-X becomes
+       +/-Y) and leaves the approach direction unchanged. 2026-09-24: the gripper
+       is mounted rotated by 90 degrees on the real arm, so the model follows.
+       The two symmetric mountings are +pi/2 and -pi/2; which one is right is
+       visible in RViz by looking at whether the fingers separate along Y or X.
+       gripper_tcp hangs under gripper_base_link, so it rotates with the gripper
+       and its pose (and therefore the meaning of any grasp pose expressed in it)
+       is unaffected. -->
+  <xacro:property name="grip_mount_yaw" value="1.5707963267948966"/>
+  <xacro:property name="grip_finger_x" value="0.067"/>       <!-- centre of a finger knuckle at full opening, |x| -->
+  <xacro:property name="grip_finger_y" value="0.0010833"/>   <!-- lateral offset of a finger knuckle centre -->
+  <xacro:property name="grip_finger_z" value="0.034083"/>    <!-- knuckle centre z in the gripper_base frame -->
+  <xacro:property name="grip_finger_travel" value="0.0435"/> <!-- travel of one finger (= half of the full opening) -->
+  <xacro:property name="grip_finger_z_min" value="0.0205"/>  <!-- lower Z bound of the finger mesh in the base frame -->
+  <xacro:property name="grip_finger_z_max" value="0.1125"/>  <!-- upper Z bound of the finger mesh in the base frame -->
+  <xacro:property name="grip_opening_max" value="0.087"/>    <!-- mechanical travel, CAD value, not written into the limit below -->
+  <xacro:property name="grip_opening_limit" value="0.07479"/><!-- joint limit upper bound = widest commandable opening; must stay in step with the SRDF open state -->
+  <xacro:property name="grip_tcp_z" value="0.0665"/>         <!-- TCP, midpoint of the two gripping faces in the base frame -->
+  <xacro:property name="grip_tcp_reach" value="0.046"/>      <!-- how far the finger tips reach past the TCP (= 0.1125 - 0.0665) -->
+  <!-- Opening speed limit, computed from the driver's own rate ceiling:
+       litegrip_max_velocity_rad_s (1.5 rad/s) x litegrip_rad_to_mm
+       (62.12189616252822 mm/rad) = 0.09318284424379233 m/s. Both factors live in
+       litegrip_ros2_control/urdf/litegrip.ros2_control.xacro, so a change there
+       has to be recomputed here. Keeping the limit equal to the real mechanical
+       rate matters: MoveIt plans against it and move_group afterwards judges the
+       controller against the planned duration, so an optimistic limit gets
+       perfectly good gripper trajectories cancelled as "taking too long". -->
+  <xacro:property name="grip_opening_vel" value="0.09318284424379233"/>
+
+  <!-- ── gripper body, fixed to the ee_link flange ─────────────────────────── -->
+  <link name="gripper_base_link">
+    <inertial>
+      <origin xyz="-7.90239142174285E-05 3.69945158980779E-05 -0.0166444528152071" rpy="0 0 0"/>
+      <mass value="0.506299067530095"/>
+      <inertia ixx="0.00014051955761899" ixy="-3.65495959038658E-06" ixz="-5.8232760915628E-07"
+               iyy="0.000308492795970996" iyz="5.76221363581957E-07" izz="0.000345331384983772"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_description/meshes/base_link.STL"/>
+      </geometry>
+      <material name="litegrip_base">
+        <color rgba="0.898039 0.917647 0.929412 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_description/meshes/base_link.STL"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="gripper_mount_joint" type="fixed">
+    <parent link="ee_link"/>
+    <child link="gripper_base_link"/>
+    <!-- The yaw component is the mounting rotation about the mounting face
+         normal. It rotates the gripper about its own approach axis, so the
+         fingers turn with it while gripper_tcp, being a child of
+         gripper_base_link, keeps both its position and its approach direction. -->
+    <origin xyz="0 0 ${grip_mount_z}" rpy="0 0 ${grip_mount_yaw}"/>
+  </joint>
+
+  <!-- ── master joint, the single commandable gripper degree of freedom ──────
+       Both fingers are driven by one transmission and cannot be commanded
+       separately. That fact is expressed in the model here, so everything above
+       (planning group, controller, gripper node) only has to deal with one
+       joint. The dummy child link carries the degree of freedom, because URDF
+       requires every joint to have a child link. -->
+  <link name="gripper_opening_link"/>
+
+  <joint name="gripper_opening_joint" type="prismatic">
+    <parent link="gripper_base_link"/>
+    <child link="gripper_opening_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0.0" upper="${grip_opening_limit}" effort="10.0" velocity="${grip_opening_vel}"/>
+  </joint>
+
+  <!-- ── finger 1 (right finger, -X side; axis +X, so a larger value moves it
+       towards the centre) ─────────────────────────────────────────────────── -->
+  <link name="gripper_slider_link1">
+    <inertial>
+      <origin xyz="0.0133451305147342 -0.00404000727940517 0.0126301584041473" rpy="0 0 0"/>
+      <mass value="0.0354537367324049"/>
+      <inertia ixx="1.73250515551137E-05" ixy="2.99209722680213E-08" ixz="-1.48556364855832E-06"
+               iyy="1.26496403976931E-05" iyz="9.04302312412081E-08" izz="6.96029785351275E-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_description/meshes/gripper_slider_link1.STL"/>
+      </geometry>
+      <material name="litegrip_finger">
+        <color rgba="1.0 1.0 1.0 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_description/meshes/gripper_slider_link1.STL"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="gripper_slide_joint_right" type="prismatic">
+    <parent link="gripper_base_link"/>
+    <child link="gripper_slider_link1"/>
+    <origin xyz="${-grip_finger_x} ${grip_finger_y} ${grip_finger_z}" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0.0" upper="${grip_finger_travel}" effort="10.0" velocity="${grip_opening_vel / 2}"/>
+    <dynamics damping="0.05" friction="0.02"/>
+    <!-- Determined entirely by the master joint: q = -0.5 * opening + travel -->
+    <mimic joint="gripper_opening_joint" multiplier="-0.5" offset="${grip_finger_travel}"/>
+  </joint>
+
+  <!-- ── finger 2 (left finger, +X side; axis -X, so the same value as the right
+       finger moves it the same way) ───────────────────────────────────────── -->
+  <link name="gripper_slider_link2">
+    <inertial>
+      <origin xyz="-0.0133451305147341 0.0040400072794052 0.0126301584041473" rpy="0 0 0"/>
+      <mass value="0.0354537367324048"/>
+      <inertia ixx="1.73250515551138E-05" ixy="2.99209722680244E-08" ixz="1.4855636485583E-06"
+               iyy="1.26496403976931E-05" iyz="-9.04302312413309E-08" izz="6.96029785351283E-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_description/meshes/gripper_slider_link2.STL"/>
+      </geometry>
+      <material name="litegrip_finger"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_description/meshes/gripper_slider_link2.STL"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="gripper_slide_joint_left" type="prismatic">
+    <parent link="gripper_base_link"/>
+    <child link="gripper_slider_link2"/>
+    <origin xyz="${grip_finger_x} ${-grip_finger_y} ${grip_finger_z}" rpy="0 0 0"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="0.0" upper="${grip_finger_travel}" effort="10.0" velocity="${grip_opening_vel / 2}"/>
+    <dynamics damping="0.05" friction="0.02"/>
+    <!-- Determined entirely by the master joint: q = -0.5 * opening + travel -->
+    <mimic joint="gripper_opening_joint" multiplier="-0.5" offset="${grip_finger_travel}"/>
+  </joint>
+
+  <!-- ── TCP: a pure reference frame, no collision and no visual ─────────────
+       It sits at the midpoint of the two gripping faces and is the frame the
+       tool point of any manipulation task is expressed in. -->
+  <link name="gripper_tcp"/>
+
+  <joint name="gripper_tcp_joint" type="fixed">
+    <parent link="gripper_base_link"/>
+    <child link="gripper_tcp"/>
+    <origin xyz="0 0 ${grip_tcp_z}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ── mock hardware ───────────────────────────────────────────────────────
+       One system covering the arm and the gripper, backed by
+       mock_components/GenericSystem with default behaviour and no parameters.
+
+       The two real hardware components are deliberately not loaded in this
+       mode: the arm component owns a shared memory link to the hardware daemon
+       and the gripper component owns can0, neither of which is available when
+       the intent is to exercise planning without hardware.
+
+       The arm joints carry position and velocity on both sides so that a
+       forward controller can be fed either one. The gripper exports position
+       only, matching what the real LitegripSystem component offers. -->
+  <xacro:if value="$(arg use_mock_hardware)">
+    <ros2_control name="VrMockSystem" type="system">
+      <hardware>
+        <plugin>mock_components/GenericSystem</plugin>
+      </hardware>
+
+      <joint name="joint1">
+        <command_interface name="position"/>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint2">
+        <command_interface name="position"/>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint3">
+        <command_interface name="position"/>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint4">
+        <command_interface name="position"/>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint5">
+        <command_interface name="position"/>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint6">
+        <command_interface name="position"/>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint7">
+        <command_interface name="position"/>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+
+      <joint name="gripper_opening_joint">
+        <command_interface name="position"/>
+        <!-- The velocity and effort state interfaces are exported for the same
+             reason the real LitegripSystem exports them: the gripper's
+             controller claims position and velocity, and an interface that is
+             missing is not a warning, it is a refusal to activate. The mock has
+             to match the real component's surface or the two would exercise
+             different code paths. -->
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+    </ros2_control>
+  </xacro:if>
+
+</robot>

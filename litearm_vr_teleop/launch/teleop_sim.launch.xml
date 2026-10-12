@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<!--
+  teleop_sim.launch.xml - teleoperation over the real protocol chain with a fake
+  firmware.
+
+  The hardware component and the firmware daemon are the real ones. The daemon
+  runs with the dry run flag, which starts a fake firmware on a pty: same framing, same
+  commands, same state reporting rate, same round trip, and a first order
+  kinematic model instead of a robot. Nothing is attached to a serial port, can0
+  is not opened, and no motor can be enabled.
+
+  Why this exists next to the virtual launch
+  ==========================================
+  The mock hardware answers "does the path run". This one answers "does the path
+  run at the right rate, and does the firmware accept what it is sent" - which is
+  where the real questions are:
+
+    * the firmware only reports state at 100 Hz, so a controller rate above that
+      writes the same feedback frame back and produces a stair stepped position
+      signal;
+    * the firmware treats the velocity field of the command frame as the slew
+      ceiling of the position reference, and freezes the reference when it is
+      zero, so a controller writing position alone produces an arm that does not
+      move;
+    * the firmware has a 100 ms command watchdog, so the command stream has to be
+      continuous.
+
+  The mock hardware can show none of those, because it accepts anything.
+
+  What it cannot do: serve as a basis for tuning gains. The fake firmware's model
+  is first order, so a following error or a stiffness measured here means
+  nothing.
+
+  Usage:
+      ros2 launch litearm_vr_teleop teleop_sim.launch.xml
+      ros2 launch litearm_vr_teleop teleop_sim.launch.xml use_rviz:=false
+
+  Connect the headset to ws://<this machine>:8765, then press the grip.-->
+<launch>
+  <arg name="use_rviz" default="true" description="start rviz2"/>
+  <arg name="use_mock_hardware" default="false"
+       description="pinned to the real protocol chain by this entry point; not meant to be changed"/>
+  <arg name="headset_port" default="8765" description="WebSocket port the headset connects to"/>
+  <arg name="headset_python" default="$(env HOME)/venvs/metavr-arm/bin/python"
+       description="interpreter providing the websockets module"/>
+  <arg name="ik_backend" default="plugin" description="plugin or dls"/>
+  <!-- Only needed if the build-time detection picked the wrong description package,
+       which can happen in a workspace that installs both names. -->
+  <arg name="arm_description_package" default="$(command 'cat $(find-pkg-share litearm_vr_moveit_config)/config/arm_description_package.txt')"
+       description="package providing the bare arm description; default detected at build time"/>
+  <arg name="ros_domain_id" default="42" description="ROS domain for this stack"/>
+  <arg name="ros_localhost_only" default="1" description="1 = local discovery only"/>
+
+  <log message="dry-run: the firmware daemon runs a fake firmware on a pty, so no arm and no can0 is involved"/>
+
+  <include file="$(find-pkg-share litearm_vr_teleop)/launch/teleop_stack.launch.xml">
+    <arg name="use_mock_hardware" value="$(var use_mock_hardware)"/>
+    <arg name="use_rviz" value="$(var use_rviz)"/>
+    <arg name="headset_port" value="$(var headset_port)"/>
+    <arg name="headset_python" value="$(var headset_python)"/>
+    <arg name="ik_backend" value="$(var ik_backend)"/>
+    <arg name="arm_description_package" value="$(var arm_description_package)"/>
+    <arg name="ros_domain_id" value="$(var ros_domain_id)"/>
+    <arg name="ros_localhost_only" value="$(var ros_localhost_only)"/>
+  </include>
+</launch>

@@ -1,0 +1,116 @@
+# vr_controllers.yaml - the controllers this stack runs, for controller_manager.
+#
+# Read together with the arm's own config
+# (litearm_ros2_control/config/litearm_controllers.yaml) because the two make
+# opposite choices, and the difference is the point of this package:
+#
+#   that stack    joint_trajectory_controller, driven by MoveIt through a
+#                 FollowJointTrajectory action: a whole trajectory at a time.
+#   this stack    vr_forward_controller, driven by vr_teleop_node through a
+#                 Float64MultiArray topic: one pose at a time, no trajectory,
+#                 no goal, no completion criterion.
+#
+# They cannot both be active. Both claim position and velocity on joint1..7, and
+# ros2_control gives a command interface to exactly one active controller. So
+# these launches deliberately do NOT include the arm's control launch, which
+# would spawn the trajectory controller: they start the same hardware and the
+# same controller manager with this file instead.
+
+controller_manager:
+  ros__parameters:
+    # 100 Hz, matching the firmware's state reporting rate rather than being
+    # higher than it. The reasoning is in the arm's own config: the hardware
+    # interface read/write pair is a shared memory copy, but the firmware only
+    # reports at 100 Hz, so a faster control loop just writes the same feedback
+    # frame back and produces a stair-stepped position signal.
+    update_rate: 100  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    vr_forward_controller:
+      type: litearm_vr_teleop/VrForwardController
+
+    # The gripper is a trajectory controller's usual problem only if you insist:
+    # its normal ending is "closed onto the object and stopped", which is a stall
+    # and not a reached goal. GripperActionController states that directly, with
+    # stalled counting as success, which is why it is used instead of a joint
+    # trajectory controller here as well.
+    gripper_controller:
+      type: position_controllers/GripperActionController
+
+vr_forward_controller:
+  ros__parameters:
+    # Order matters and is the order of the values on the command topic. It is
+    # also the order in which the interfaces are written, so a mistake here moves
+    # the wrong axis.
+    joints: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
+
+    # Ceiling on the velocity written alongside each position, rad/s.
+    #
+    # The firmware reads the velocity field of its command frame as the slew
+    # ceiling of the position reference, so this is a real motion limit and not a
+    # hint. 1.0 rad/s is the same guard rail as the arm's servo controller uses:
+    # well above anything a teleoperation approach needs (a 3 cm/s tool motion is
+    # about 0.06 rad/s at the joints), and well below the firmware's own speed
+    # limit, where crossing it is a fault rather than a slow-down.
+    max_velocity: 1.0
+
+    # A setpoint older than this is treated as absent and the joints hold. This is
+    # the safety net for this node dying, not the normal way of holding: releasing
+    # the grip makes the teleop node publish the measured pose, which is a hold
+    # with no latency.
+    command_timeout_s: 0.2
+
+    command_topic: /vr_forward_controller/commands
+
+# The two lists below select WHAT the broadcaster publishes, not the order it
+# publishes in, and the difference is worth reading before relying on either.
+#
+# Left alone, the broadcaster publishes every state interface it can find. The
+# lists above pin the published set to these eight joints and these two
+# interfaces, so a diagnostic interface appearing on the hardware later cannot
+# silently add entries to a stream that consumers index.
+#
+# The ORDER, however, is the order in which the resource manager hands the
+# interfaces back, and it is neither the order of this list nor the joint number
+# order nor stable between restarts. Measured on this machine, two consecutive
+# runs of the same launch produced
+#   gripper_opening_joint, joint2, joint3, joint5, joint6, joint1, joint4, joint7
+# and
+#   joint2, joint3, joint5, joint6, joint1, joint4, joint7, gripper_opening_joint
+# - the same set, a different sequence, with the gripper at opposite ends.
+#
+# So: /joint_states must be read by NAME. A consumer that takes position[index]
+# and assumes index 0 is joint1 will get a permutation of plausible joint angles:
+# it will look like data, not like a fault, and it will differ between runs.
+joint_state_broadcaster:
+  ros__parameters:
+    joints: [joint1, joint2, joint3, joint4, joint5, joint6, joint7, gripper_opening_joint]
+    interfaces: [position, velocity]
+
+gripper_controller:
+  ros__parameters:
+    # The master joint only. The two fingers are its <mimic> and have no
+    # independent command port.
+    joint: gripper_opening_joint
+
+    # These are the values from litegrip_ros2_control/config/litegrip_controllers.yaml.
+    # They are repeated rather than reused because that file also declares the
+    # controller, and a controller cannot be declared twice on one controller
+    # manager. A change there has to be reflected here.
+    action_monitor_rate: 20.0
+    # 1.5 mm, about 2 percent of the 74.79 mm commandable travel. The controller
+    # returns success the moment it judges the goal reached, without waiting for
+    # the mechanism, so a loose tolerance here means a grasp is reported as
+    # finished before the fingers have moved.
+    goal_tolerance: 0.0015
+    # Closing onto an object and stopping is what a grasp IS. Without this the
+    # controller would report every successful grasp as a failure.
+    allow_stalling: true
+    stall_velocity_threshold: 0.001
+    stall_goal_tolerance: 0.008
+    # Compared against by the controller's own stall detection; not commanded as
+    # torque. The torque budget is a deployment parameter of the gripper's
+    # hardware component.
+    max_effort: 3.5
