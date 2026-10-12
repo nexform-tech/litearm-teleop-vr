@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>litearm_vr_moveit_config</name>
+  <version>1.0.0</version>
+  <description>
+    MoveIt 2 configuration for the merged robot formed by the 7 axis LiteArm arm
+    and the LiteGrip gripper, used by the VR teleoperation stack. Contains the
+    merged robot description, its semantic description, kinematics and joint
+    limits, an OMPL planning pipeline, the MoveIt controller configuration and
+    an RViz layout.
+  </description>
+  <maintainer email="TODO@email.com">TODO</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Arm description and hardware: litearm_ros2_control wraps the litearm
+       description package and adds the arm ros2_control component; litearm is
+       the pure arm description included directly on the mock hardware path. -->
+  <exec_depend>litearm_ros2_control</exec_depend>
+  <exec_depend>litearm_description</exec_depend>
+
+  <!-- Gripper: the hardware component plus the package the finger meshes are
+       referenced from through package:// URIs. -->
+  <exec_depend>litegrip_ros2_control</exec_depend>
+  <exec_depend>litegrip_description</exec_depend>
+
+  <!-- Arm semantic description: the SRDF pulled in by srdf/litearm_vr.srdf.xacro -->
+  <exec_depend>litearm_moveit_config</exec_depend>
+
+  <exec_depend>moveit</exec_depend>
+  <exec_depend>moveit_configs_utils</exec_depend>
+  <exec_depend>moveit_kinematics</exec_depend>
+  <exec_depend>moveit_planners_ompl</exec_depend>
+  <exec_depend>moveit_ros_visualization</exec_depend>
+  <exec_depend>moveit_simple_controller_manager</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>forward_command_controller</exec_depend>
+  <exec_depend>gripper_controllers</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

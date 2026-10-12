@@ -1,15 +1,22 @@
-# Provisional: replace once the documentation toolchain is chosen
-# (MkDocs, Docusaurus, Sphinx, VitePress, ...).
-
-# Rendered site
-site/
-_build/
+# colcon workspace layout, when this repository is built in place
 build/
-dist/
-public/
+install/
+log/
 
-# Toolchain caches
-.cache/
-node_modules/
-.venv/
+# Python
 __pycache__/
+*.py[cod]
+.pytest_cache/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+Testing/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

@@ -1,0 +1,25 @@
+<library path="litearm_vr_teleop_controller">
+  <class
+    name="litearm_vr_teleop/VrForwardController"
+    type="litearm_vr_teleop::VrForwardController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Forward controller for teleoperated position setpoints: a stream of seven
+      joint positions on ~/commands is passed to the hardware interfaces with no
+      trajectory and no goal.
+
+      It derives from forward_command_controller::ForwardControllersBase, and it
+      has to override update() because of a property of this arm: the firmware
+      reads the velocity field of the command frame as the slew ceiling of the
+      position reference, so a controller that writes position alone leaves the
+      velocity interface at zero, which freezes the reference and produces an arm
+      that accepts commands without moving. Each written position therefore
+      carries a velocity derived from the setpoint stream, bounded by
+      max_velocity.
+
+      On a stale command (command_timeout_s) or before the first command it
+      holds at the measured position with zero velocity, which on this firmware is
+      the only true hold.
+    </description>
+  </class>
+</library>

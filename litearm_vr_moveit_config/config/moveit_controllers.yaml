@@ -1,0 +1,61 @@
+# moveit_controllers.yaml — the controllers MoveIt talks to.
+#
+# joint_trajectory_controller is the ros2_control trajectory controller declared
+# by litearm_ros2_control. MoveIt sends the planned result to it as a
+# FollowJointTrajectory action goal and the controller interpolates that into the
+# hardware command stream.
+#
+# Ownership note: a ros2_control command interface can be claimed by only one
+# active controller at a time, so no second controller may claim the position or
+# velocity interfaces of these seven joints while this one is active.
+#
+# gripper_controller is a real ros2_control controller
+# (position_controllers/GripperActionController, declared and spawned by the
+# litegrip stack) whose action type is
+# control_msgs/action/GripperCommand.
+#
+# Why the gripper does not use FollowJointTrajectory: a gripper's normal outcome
+# is "close until contact and stop", which under a trajectory controller only
+# works with goal_time 0.0, and that disables the controller's timeout judging
+# altogether. GripperCommand carries stalled and reached_goal, whose semantics
+# match the mechanism directly.
+#
+# MoveIt's action name is "<controller name>/<action_ns>", so writing gripper_cmd
+# here makes the real action name /gripper_controller/gripper_cmd, not
+# /gripper_controller/follow_joint_trajectory.
+#
+# moveit_simple_controller_manager's GripperControllerHandle reduces a planned
+# gripper trajectory to its LAST waypoint and sends that as a single
+# GripperCommand goal, so a MoveTo for the gripper group still works while no
+# "trajectory took too long" judgement applies to it.
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - joint_trajectory_controller
+    - gripper_controller
+
+  joint_trajectory_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - joint1
+      - joint2
+      - joint3
+      - joint4
+      - joint5
+      - joint6
+      - joint7
+
+  gripper_controller:
+    type: GripperCommand
+    action_ns: gripper_cmd
+    # The master joint only. Its value is the opening in metres: 0 is fully
+    # closed and 0.07479 is the widest commandable opening (the mechanical travel
+    # is 0.087 m but the driver red line allows no more than 74.79 mm). The two
+    # fingers are the mimic of this joint and have no command port of their own,
+    # so they never appear in a trajectory. The joint name has to match
+    # urdf/litearm_vr.urdf.xacro.
+    joints:
+      - gripper_opening_joint

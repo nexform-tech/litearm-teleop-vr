@@ -1,0 +1,81 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>litearm_vr_teleop</name>
+  <version>1.0.0</version>
+  <description>
+    Virtual reality teleoperation for the 7-axis LiteArm with a LiteGrip gripper.
+
+    Three pieces, split so that the parts that are hard to debug on real
+    hardware are the parts that are easy to test:
+
+      1. headset_link.py      the WebSocket link to the headset. Transport and
+                              parsing only, no robot knowledge.
+      2. vr_teleop_node       C++: teleoperated semantics, inverse kinematics
+                              planning, and the command stream to the controller.
+      3. VrForwardController  a ros2_control controller derived from
+                              forward_command_controller that writes position
+                              AND velocity, because this arm's firmware treats
+                              velocity as the slew ceiling of the position
+                              reference and freezes the joint when it is zero.
+  </description>
+  <maintainer email="TODO@email.com">TODO</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>builtin_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>control_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>tf2_ros</depend>
+  <depend>controller_interface</depend>
+  <depend>forward_command_controller</depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>realtime_tools</depend>
+  <depend>moveit_core</depend>
+  <depend>moveit_kinematics</depend>
+  <depend>srdfdom</depend>
+  <depend>urdf</depend>
+  <depend>eigen</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>gripper_controllers</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>litearm_vr_moveit_config</exec_depend>
+  <exec_depend>litearm_ros2_control</exec_depend>
+  <exec_depend>litegrip_ros2_control</exec_depend>
+  <!-- The default inverse kinematics backend is loaded by class name at runtime, not
+       linked, so that switching solvers stays a configuration change. This is the
+       solver the shipped configuration names. -->
+  <exec_depend>sns_ik_kinematics_plugin</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-yaml</test_depend>
+  <test_depend>xacro</test_depend>
+  <!-- test_kinematics_consistency.py reads this package's configuration to prove the
+       solver tuning and the teleop start pose have not drifted from the originals. -->
+  <test_depend>litearm_vr_moveit_config</test_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

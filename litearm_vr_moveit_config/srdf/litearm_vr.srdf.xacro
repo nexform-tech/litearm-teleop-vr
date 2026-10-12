@@ -1,0 +1,101 @@
+<?xml version="1.0"?>
+<!--
+  litearm_vr.srdf.xacro — MoveIt semantic description for the merged
+  "7 axis LiteArm + LiteGrip gripper" robot.
+
+  Structure
+  =========
+  The arm half (planning group litearm_arm, the zero and ready states, the
+  collision matrix and the virtual joint) is pulled in from
+  litearm_moveit_config/config/litearm.srdf rather than restated. That file's
+  collision matrix is generated from the real meshes and is the single source of
+  truth for it, so regenerating it there keeps this package in step instead of
+  letting a second copy drift. Only the gripper additions live here.
+
+  What is added
+  =============
+    group "gripper"          The master joint gripper_opening_joint only, whose
+                             value is the opening in metres. The two fingers
+                             (gripper_slide_joint_left/right) are deliberately
+                             kept OUT of the group: they are the mimic of the
+                             master joint and have no independent command port,
+                             so putting them in a group would invite MoveIt to
+                             plan for degrees of freedom that cannot be driven.
+                             The mimic relation is expressed in the URDF and the
+                             finger positions are derived from the master joint.
+    group_state open/closed  Named configurations for the gripper group:
+                               open   = 0.07479  widest commandable opening
+                               closed = 0.0      fully closed
+                             open uses the driver bound rather than the CAD
+                             mechanical travel of 0.087 m, because the driver
+                             clamps anything wider and allow_stalling makes the
+                             resulting shortfall look like success.
+    group_state grasp_ready  The arm pose the VR teleoperation session starts
+                             from.
+    end_effector             parents the gripper group onto the arm group.
+    disable_collisions       only the structurally adjacent pairs plus the pair
+                             of coaxial fingers, so that every other combination
+                             keeps its collision check: a gripper hitting the arm
+                             or the table is a real collision and has to stay
+                             visible to the planner.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="litearm">
+
+  <!-- Arm semantics: planning group litearm_arm, the zero and ready states, the
+       collision matrix and the virtual joint. -->
+  <xacro:include filename="$(find litearm_moveit_config)/config/litearm.srdf"/>
+
+  <!-- ── arm start pose for VR teleoperation ─────────────────────────────────
+       (0, -37, 0, -114, 0, -48, 0) degrees, converted to radians.
+
+       WARNING: the same seven numbers are hardcoded on the C++ side of the VR
+       stack (the teleop start pose). Both places describe one decision about
+       where a session begins, so they have to move together. Changing one alone
+       leaves the planner starting from a pose the planner's peers do not expect.
+
+       joint4 at -1.989675 rad stays inside its limit range of
+       [-3.071547, 0.017547]. -->
+  <group_state name="grasp_ready" group="litearm_arm">
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="-0.645772"/>
+    <joint name="joint3" value="0"/>
+    <joint name="joint4" value="-1.989675"/>
+    <joint name="joint5" value="0"/>
+    <joint name="joint6" value="-0.837758"/>
+    <joint name="joint7" value="0"/>
+  </group_state>
+
+  <!-- ── gripper planning group: the master joint only ─────────────────────── -->
+  <group name="gripper">
+    <joint name="gripper_opening_joint"/>
+  </group>
+
+  <!-- open: widest commandable opening, 74.79 mm -->
+  <group_state name="open" group="gripper">
+    <joint name="gripper_opening_joint" value="0.07479"/>
+  </group_state>
+
+  <!-- closed: fully closed, the two inner faces meet -->
+  <group_state name="closed" group="gripper">
+    <joint name="gripper_opening_joint" value="0.0"/>
+  </group_state>
+
+  <!-- ── end effector declaration ──────────────────────────────────────────
+       parent_link has to be a link on the parent_group's chain, which is ee_link,
+       the arm's tip. -->
+  <end_effector name="gripper" parent_link="ee_link" group="gripper" parent_group="litearm_arm"/>
+
+  <!-- ── gripper internal and arm tip adjacency pairs ────────────────────────
+       joint7 against gripper_base_link has to be released as well: the gripper
+       body is mounted on ee_link, so joint7, ee_link and gripper_base_link are
+       connected by fixed transforms only and their relative pose never changes,
+       while the arm's collision meshes are convex hulls and therefore slightly
+       larger than the source CAD. Without this pair the stack reports
+       "joint7 colliding with gripper_base_link" as soon as it starts. -->
+  <disable_collisions link1="ee_link" link2="gripper_base_link" reason="Adjacent"/>
+  <disable_collisions link1="joint7" link2="gripper_base_link" reason="Adjacent"/>
+  <disable_collisions link1="gripper_base_link" link2="gripper_slider_link1" reason="Adjacent"/>
+  <disable_collisions link1="gripper_base_link" link2="gripper_slider_link2" reason="Adjacent"/>
+  <disable_collisions link1="gripper_slider_link1" link2="gripper_slider_link2" reason="Never"/>
+
+</robot>
