@@ -68,7 +68,7 @@ jobs:
             python3-colcon-common-extensions \
             python3-pytest \
             python3-yaml \
-            python3-xacro \
+            ros-humble-xacro \
             ros-humble-ament-cmake \
             ros-humble-ament-cmake-gtest \
             ros-humble-ament-cmake-pytest \
