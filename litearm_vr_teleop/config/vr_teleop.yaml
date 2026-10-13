@@ -256,7 +256,14 @@ vr_teleop:
     #
     # A change takes effect on the next headset frame; until then the arm holds
     # the pose it had.
-    rotation_signs: [1.0, 1.0, 1.0]
+    #
+    # Measured on this rig: raising the controller tilted the tool down and
+    # lowering it tilted the tool up, so the pitch axis is mirrored here. The
+    # first component is the rotation about the robot's x - with the operator
+    # facing +y that is their left-right axis, and it is the axis a hand raised
+    # and lowered turns about. The other two are as measured, so a sideways lean
+    # and a turn of the wrist answer in the direction the operator expects.
+    rotation_signs: [-1.0, 1.0, 1.0]
 
     # Freeze when the headset goes quiet. Deliberately much shorter than the
     # controller's own staleness timeout: this node knows more than the controller
