@@ -1142,7 +1142,13 @@ private:
 
     if (!latest_frame_valid_) {
       // Nothing to follow from, and no pose to anchor on. The watchdog has
-      // already said so; the next grip press re-anchors.
+      // already said so; the next grip press re-anchors. Said out loud as well:
+      // a hold with no explanation reads as an arm that has stopped listening,
+      // and the operator has no way to tell it from a link that died.
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "velocity following has no frame to follow (the link is quiet or the grip was just "
+        "released): holding");
       publishHold();
       return;
     }
@@ -1164,6 +1170,13 @@ private:
         latest_frame_.quaternion.z).normalized(),
       dt);
     if (!hand_twist.valid) {
+      // The mapping is not anchored, so there is no hand motion to interpret -
+      // the one way this loop can hold without anything else having gone wrong,
+      // and the one that used to be silent. A grip press anchors it.
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "the hand mapping is not anchored, so no twist can be measured: holding. "
+        "Press the grip to anchor it");
       publishHold();
       return;
     }
