@@ -257,13 +257,22 @@ vr_teleop:
     # A change takes effect on the next headset frame; until then the arm holds
     # the pose it had.
     #
-    # Measured on this rig: raising the controller tilted the tool down and
-    # lowering it tilted the tool up, so the pitch axis is mirrored here. The
-    # first component is the rotation about the robot's x - with the operator
-    # facing +y that is their left-right axis, and it is the axis a hand raised
-    # and lowered turns about. The other two are as measured, so a sideways lean
-    # and a turn of the wrist answer in the direction the operator expects.
-    rotation_signs: [-1.0, 1.0, 1.0]
+    # Measured on this rig: raising the controller tilted the tool down, lowering
+    # it tilted the tool up, and leaning the controller left and right tilted the
+    # tool the other way as well. Two components are mirrored here, and the two
+    # that are mean something: with the operator facing +y, the first is the
+    # rotation about the robot's x - the left-right axis a hand raised and lowered
+    # turns about - and the second is the rotation about its y, the forward axis a
+    # hand leaning sideways turns about. Mirroring both and leaving z alone is a
+    # half turn about z, which is what an operator standing on the far side of the
+    # arm from where the baseline was measured would see.
+    #
+    # That also means the TRANSLATION has to be checked, because the same frame
+    # correspondence carries it (singleArmUprightMapping in teleop_math.cpp): if
+    # pushing the controller forward moves the tool backward, or right moves it
+    # left, then the correspondence is the thing to fix and these two signs must
+    # come back to 1.0 - correcting both would be correcting twice.
+    rotation_signs: [-1.0, -1.0, 1.0]
 
     # Freeze when the headset goes quiet. Deliberately much shorter than the
     # controller's own staleness timeout: this node knows more than the controller
