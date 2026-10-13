@@ -265,6 +265,13 @@ if(BUILD_TESTING)
     APPEND_ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
   )
 
+  # The launch files and the gripper's hardware component must agree about the
+  # argument names, and the defaults must be the safe direction; see the test's
+  # own docstring for why a xacro argument nobody passes is a silent failure.
+  ament_add_pytest_test(test_launch_arguments test/test_launch_arguments.py
+    APPEND_ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
+  )
+
   # The description-mesh check the launch runs: it must name the package a
   # description refers to and cannot reach, and must stay quiet when it can.
   ament_add_pytest_test(test_description_meshes test/test_description_meshes.py

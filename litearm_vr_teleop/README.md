@@ -387,6 +387,51 @@ ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # fake firmware, real 
 Both start the same controllers and the same nodes. The difference is the last
 centimetre, and it decides what the run can tell you.
 
+### The gripper, and which launch can move it
+
+The gripper's hardware is configured through xacro arguments, and they are launch
+arguments here, so the bench decides what is attached. Two of them differ in what
+they block, and both have to be opened to move a real gripper:
+
+| argument | default | what it blocks |
+| --- | --- | --- |
+| `litegrip_dry_run` | `true` | touching the hardware at all - the component drives a simulated plant instead of can0 |
+| `litegrip_hardware_enable` | `false` | the motor gate: "is a gripper actually attached" |
+| `litegrip_channel` / `_can_id` / `_mst_id` | `can0` / `8` / `24` | which bus and addresses the gripper answers on |
+| `litegrip_max_feedback_velocity_rad_s` | `1.5` | the component sends no motion frame without a positive bound; the xacro's own default is a fail-closed negative |
+
+```bash
+# a real gripper, with the arm faked by the daemon's dry run (the usual bench)
+ros2 launch litearm_vr_teleop teleop_sim.launch.xml \
+    litegrip_dry_run:=false litegrip_hardware_enable:=true
+
+# a real gripper and a real arm
+ros2 launch litearm_vr_teleop teleop_stack.launch.xml use_mock_hardware:=false \
+    litegrip_dry_run:=false litegrip_hardware_enable:=true
+```
+
+**`teleop_virtual.launch.xml` cannot drive a real gripper, at any setting**, which
+is why it offers none of these arguments: its mock hardware is one component
+covering the arm *and* the gripper, so the gripper's hardware is simulated along
+with the arm's. The check to keep in mind in both directions is the component's
+own line in the log:
+
+```text
+[LitegripSystem] gripper hardware interface initialized: joint=gripper_opening_joint
+    channel=can0 dry_run=false hardware_enable=true, calibration ...
+```
+
+`dry_run=true` there means the real gripper is not being driven, whatever the
+launch file looked like.
+
+```bash
+ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock hardware
+ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # fake firmware, real protocol
+```
+
+Both start the same controllers and the same nodes. The difference is the last
+centimetre, and it decides what the run can tell you.
+
 **virtual** replaces the hardware with `mock_components/GenericSystem`: no
 firmware, no daemon, no shared memory, no protocol, and the mock arm is at the
 commanded pose immediately. Use it to watch the whole path run cheaply, and to

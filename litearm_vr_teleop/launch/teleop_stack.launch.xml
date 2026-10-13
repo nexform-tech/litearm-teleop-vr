@@ -47,6 +47,15 @@
   <arg name="arm_description_package"
        default="$(command 'cat $(find-pkg-share litearm_vr_moveit_config)/config/arm_description_package.txt')"
        description="package providing the bare arm description (no ros2_control blocks). Default comes from litearm_vr_moveit_config's build, which detected it: the name differs between workspaces (litearm vs litearm_description) and xacro cannot compose it from a variable"/>
+  <arg name="litegrip_dry_run" default="true"
+       description="true = the gripper component drives a simulated plant instead of can0"/>
+  <arg name="litegrip_hardware_enable" default="false"
+       description="the gripper's motor gate; true only when a gripper is actually attached. Both this and litegrip_dry_run:=false are needed to move a real one"/>
+  <arg name="litegrip_channel" default="can0" description="CAN channel the gripper answers on"/>
+  <arg name="litegrip_can_id" default="8" description="gripper command CAN id (decimal, as the component reads it)"/>
+  <arg name="litegrip_mst_id" default="24" description="gripper feedback CAN id (decimal)"/>
+  <arg name="litegrip_max_feedback_velocity_rad_s" default="1.5"
+       description="calibrated bound on the gripper's feedback velocity; the component refuses to send motion frames without a positive one"/>
   <arg name="follow_mode" default="velocity"
        description="velocity (hand speed integrated at the control rate, the default) or position (target and solver)"/>
   <arg name="ik_backend" default="plugin"
@@ -67,14 +76,28 @@
        the two real hardware blocks with a single mock one, so the component that
        gets loaded is decided by which file this is. -->
   <!-- The gripper's hardware component is configured through xacro arguments, which
-       this launch therefore has to supply. The three below are the ones that decide
-       whether it will move at all:
+       this launch therefore has to supply. They are all launch arguments now, so
+       the bench decides what is attached without anyone editing the xacro.
+
+       They are read by the REAL hardware branch only: the mock branch replaces the
+       gripper's component along with the arm's, so with use_mock_hardware:=true
+       nothing below has an effect and the gripper is simulated. A real gripper on
+       a bench with no arm is teleop_sim.launch.xml, whose arm is the daemon's dry
+       run while the gripper is real.
 
          litegrip_dry_run              true: the component drives a simulated plant
-                                       instead of can0. Always true here, because
-                                       this stack has no real-hardware launch.
-         litegrip_hardware_enable      false: the motor gate. Belt and braces next to
-                                       the line above.
+                                       instead of can0.
+         litegrip_hardware_enable      false: the motor gate. It blocks a different
+                                       thing from the line above - "is a gripper
+                                       actually attached" rather than "is this a
+                                       mock run" - so both have to be opened to move
+                                       a real one, deliberately:
+                                         litegrip_dry_run:=false
+                                         litegrip_hardware_enable:=true
+         litegrip_channel, _can_id, _mst_id
+                                       The bus the gripper answers on. Defaults are
+                                       the arm's own values; change them when the
+                                       gripper shares a bus, or when two rigs do.
          litegrip_max_feedback_velocity_rad_s
                                        The component refuses to send ANY motion frame
                                        when this bound is missing (its default is
@@ -105,7 +128,7 @@
   <let name="arm_description_xacro"
        value="$(find-pkg-share $(var arm_description_package))/urdf/$(var arm_description_package).urdf"/>
   <let name="urdf"
-       value="$(command 'xacro $(find-pkg-share litearm_vr_moveit_config)/urdf/litearm_vr.urdf.xacro use_mock_hardware:=$(var use_mock_hardware) litearm_shm_name:=$(var shm_name) arm_description_xacro:=$(var arm_description_xacro) litegrip_dry_run:=true litegrip_hardware_enable:=false litegrip_max_feedback_velocity_rad_s:=1.5')"/>
+       value="$(command 'xacro $(find-pkg-share litearm_vr_moveit_config)/urdf/litearm_vr.urdf.xacro use_mock_hardware:=$(var use_mock_hardware) litearm_shm_name:=$(var shm_name) arm_description_xacro:=$(var arm_description_xacro) litegrip_dry_run:=$(var litegrip_dry_run) litegrip_hardware_enable:=$(var litegrip_hardware_enable) litegrip_channel:=$(var litegrip_channel) litegrip_can_id:=$(var litegrip_can_id) litegrip_mst_id:=$(var litegrip_mst_id) litegrip_max_feedback_velocity_rad_s:=$(var litegrip_max_feedback_velocity_rad_s)')"/>
   <let name="srdf"
        value="$(command 'xacro $(find-pkg-share litearm_vr_moveit_config)/srdf/litearm_vr.srdf.xacro')"/>
   <let name="teleop_params"
@@ -113,7 +136,7 @@
   <let name="controller_params"
        value="$(find-pkg-share litearm_vr_teleop)/config/vr_controllers.yaml"/>
 
-  <log message="──────── LiteArm VR teleop ────────&#10;  mock hardware: $(var use_mock_hardware)&#10;  arm description: $(var arm_description_package)&#10;  headset: ws://0.0.0.0:$(var headset_port)&#10;  inverse kinematics backend: $(var ik_backend)&#10;  following: $(var follow_mode)&#10;  To watch this stack from another terminal, export:&#10;      export ROS_DOMAIN_ID=$(var ros_domain_id) ROS_LOCALHOST_ONLY=$(var ros_localhost_only)&#10;────────────────────────────────────"/>
+  <log message="──────── LiteArm VR teleop ────────&#10;  mock hardware: $(var use_mock_hardware)&#10;  arm description: $(var arm_description_package)&#10;  headset: ws://0.0.0.0:$(var headset_port)&#10;  inverse kinematics backend: $(var ik_backend)&#10;  following: $(var follow_mode)&#10;  gripper: $(var litegrip_channel) id $(var litegrip_can_id)/$(var litegrip_mst_id), dry-run $(var litegrip_dry_run), motor enabled $(var litegrip_hardware_enable)&#10;  To watch this stack from another terminal, export:&#10;      export ROS_DOMAIN_ID=$(var ros_domain_id) ROS_LOCALHOST_ONLY=$(var ros_localhost_only)&#10;────────────────────────────────────"/>
 
   <!-- ── 1. hardware ───────────────────────────────────────────────────────── -->
 

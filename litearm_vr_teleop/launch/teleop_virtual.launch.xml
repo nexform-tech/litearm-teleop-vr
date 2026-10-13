@@ -34,6 +34,11 @@
   <arg name="headset_python" default="$(env HOME)/venvs/metavr-arm/bin/python"
        description="interpreter providing the websockets module"/>
   <arg name="ik_backend" default="plugin" description="plugin or dls"/>
+  <!-- The gripper has no arguments here on purpose. The mock hardware block is
+       one component covering the arm AND the gripper, so this entry point cannot
+       drive a real gripper at any setting: its hardware is simulated along with
+       the arm's. Use teleop_sim.launch.xml for a real gripper - it keeps the arm
+       fake (the daemon's dry run) while the gripper component is the real one. -->
   <arg name="follow_mode" default="velocity" description="velocity (default) or position"/>
   <!-- Only needed if the build-time detection picked the wrong description package,
        which can happen in a workspace that installs both names. -->

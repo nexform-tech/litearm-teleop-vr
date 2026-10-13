@@ -286,6 +286,45 @@ ros2 param set /vr_teleop rotation_mode tool
 
 ```bash
 ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock 硬件
+ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # 假固件 + 真协议
+```
+
+两者启动同一套控制器和节点，差别在最后那一厘米，而那一厘米决定了这次运行能说明什么。
+
+### 夹爪：哪条 launch 才驱得动它
+
+夹爪的硬件由 xacro 参数配置，这里已经把那些参数**提升为 launch 参数**，所以"台架上装了什么"由命令行决定，
+不需要改 xacro。其中两个参数挡的不是同一件事，**要动真夹爪必须两个都打开**：
+
+| 参数 | 默认 | 它挡什么 |
+| --- | --- | --- |
+| `litegrip_dry_run` | `true` | 是否碰硬件：true 时组件驱动一个模拟被控对象，而不是 can0 |
+| `litegrip_hardware_enable` | `false` | 电机闸门："到底有没有装夹爪" |
+| `litegrip_channel` / `_can_id` / `_mst_id` | `can0` / `8` / `24` | 挂在哪个总线、哪两个 CAN id |
+| `litegrip_max_feedback_velocity_rad_s` | `1.5` | 没有正的速度上界时组件**一帧运动指令都不发**；xacro 自己的默认是负值（fail-closed） |
+
+```bash
+# 真夹爪 + 假臂（台架常用：臂由 daemon 的 dry run 顶替）
+ros2 launch litearm_vr_teleop teleop_sim.launch.xml \
+    litegrip_dry_run:=false litegrip_hardware_enable:=true
+
+# 真夹爪 + 真臂
+ros2 launch litearm_vr_teleop teleop_stack.launch.xml use_mock_hardware:=false \
+    litegrip_dry_run:=false litegrip_hardware_enable:=true
+```
+
+**`teleop_virtual.launch.xml` 无论怎么传都驱不动真夹爪**，所以它一个夹爪参数都不暴露：它的 mock 硬件是
+**一个组件同时覆盖臂和夹爪**，夹爪的硬件跟着臂一起被模拟了。两个方向都靠同一行日志判断：
+
+```text
+[LitegripSystem] gripper hardware interface initialized: joint=gripper_opening_joint
+    channel=can0 dry_run=false hardware_enable=true, calibration ...
+```
+
+这一行里 `dry_run=true` 就表示真夹爪没被驱动 —— 不管 launch 看起来是什么样。
+
+```bash
+ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock 硬件
 ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # 假固件，真协议
 ```
 

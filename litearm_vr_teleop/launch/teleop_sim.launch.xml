@@ -44,7 +44,19 @@
   <arg name="headset_python" default="$(env HOME)/venvs/metavr-arm/bin/python"
        description="interpreter providing the websockets module"/>
   <arg name="ik_backend" default="plugin" description="plugin or dls"/>
+  <!-- The gripper arguments reach the component through teleop_stack, so the
+       same two flags move a real gripper under this entry point as well:
+         litegrip_dry_run:=false litegrip_hardware_enable:=true -->
   <arg name="follow_mode" default="velocity" description="velocity (default) or position"/>
+  <arg name="litegrip_dry_run" default="true"
+       description="gripper: true = simulated plant instead of can0 (leave true unless you mean to move a real gripper)"/>
+  <arg name="litegrip_hardware_enable" default="false"
+       description="gripper: the motor gate. Moving a real gripper needs this true AND litegrip_dry_run:=false"/>
+  <arg name="litegrip_channel" default="can0" description="gripper: CAN channel"/>
+  <arg name="litegrip_can_id" default="8" description="gripper: command CAN id"/>
+  <arg name="litegrip_mst_id" default="24" description="gripper: feedback CAN id"/>
+  <arg name="litegrip_max_feedback_velocity_rad_s" default="1.5"
+       description="gripper: calibrated feedback velocity bound; the component sends no motion frames without a positive one"/>
   <!-- Only needed if the build-time detection picked the wrong description package,
        which can happen in a workspace that installs both names. -->
   <arg name="arm_description_package" default="$(command 'cat $(find-pkg-share litearm_vr_moveit_config)/config/arm_description_package.txt')"
@@ -61,6 +73,12 @@
     <arg name="headset_python" value="$(var headset_python)"/>
     <arg name="ik_backend" value="$(var ik_backend)"/>
     <arg name="follow_mode" value="$(var follow_mode)"/>
+    <arg name="litegrip_dry_run" value="$(var litegrip_dry_run)"/>
+    <arg name="litegrip_hardware_enable" value="$(var litegrip_hardware_enable)"/>
+    <arg name="litegrip_channel" value="$(var litegrip_channel)"/>
+    <arg name="litegrip_can_id" value="$(var litegrip_can_id)"/>
+    <arg name="litegrip_mst_id" value="$(var litegrip_mst_id)"/>
+    <arg name="litegrip_max_feedback_velocity_rad_s" value="$(var litegrip_max_feedback_velocity_rad_s)"/>
     <arg name="arm_description_package" value="$(var arm_description_package)"/>
     <arg name="ros_domain_id" value="$(var ros_domain_id)"/>
     <arg name="ros_localhost_only" value="$(var ros_localhost_only)"/>
