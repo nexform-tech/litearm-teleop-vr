@@ -5,7 +5,8 @@ LiteGrip gripper through ros2_control. Read this if you are building, running or
 reasoning behind each decision lives in the package READMEs, and this file is the map.
 
 Chinese documentation: [README.zh-CN.md](README.zh-CN.md), and a five minute path through the stack:
-[docs/QUICKSTART.zh.md](docs/QUICKSTART.zh.md).
+[docs/quickstart.zh-CN.md](docs/quickstart.zh-CN.md) (Chinese),
+and the same path in five minutes in English: [docs/quickstart.md](docs/quickstart.md).
 
 ## Packages
 
@@ -34,9 +35,9 @@ re-anchors on the next grip press.
 - The arm's sibling packages, which this repository does not contain: `litearm_description`,
   `litearm_ros2_control`, `litearm_moveit_config`, `litegrip_description`, `litegrip_ros2_control`.
 - A Quest 3 headset, or a client that speaks the same WebSocket frame format, for anything that follows.
-- `websockets` for the Python node. The system Python on the reference machine does not have it, so
-  `headset_link.py` re-executes itself into the interpreter named by `LITEARM_VR_PYTHON`
-  (`~/venvs/metavr-arm/bin/python` by default) unless the current one already has the module.
+- `websockets` for the Python node. Not every system Python has it, so `headset_link.py`
+  re-executes itself into the interpreter named by `LITEARM_VR_PYTHON` unless the current one
+  already has the module.
 
 ## Build
 
@@ -75,7 +76,7 @@ are worth knowing before a session:
 | --- | --- | --- |
 | `control_frame` | `base_link` | Which control logic reads the controller's rotation: the robot base frame (`base_link`, the default) or the tool's own frame (`tool`, the previous behaviour). Each carries its own calibration. Settable while the node runs. |
 | `reference_pose` | `commanded` | Whether the hand's increment is measured against the measured pose (each frame rebuilt from where the arm is, which feeds the solver's own residual back into the target and makes a still hand oscillate) or against the last commanded pose, which is the default: no residual in the loop, and the operator's whole displacement is delivered even while the arm lags, bounded by the lead cap. |
-| `control_rate_hz` | `100.0` | The rate the node aims for. It does not reach it while it solves inverse kinematics per command: about 23 Hz was measured on the reference machine, which is why every `dt`-scaled limit in the config is worth checking against `ros2 topic hz /vr_forward_controller/commands`. |
+| `control_rate_hz` | `100.0` | The rate the node aims for. It does not reach it while it solves inverse kinematics per command: about 23 Hz has been measured with the plugin backend, which is why every `dt`-scaled limit in the config is worth checking against `ros2 topic hz /vr_forward_controller/commands`. |
 
 ## Tests
 

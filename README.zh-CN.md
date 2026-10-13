@@ -9,14 +9,14 @@ LiteArm 七轴机械臂 + LiteGrip 夹爪的 VR 遥操，跑在 ros2_control 上
 | `litearm_vr_teleop` | 遥操栈本体：头显通信、遥操节点、以及驱动硬件的 ros2_control forward 控制器。**原理与取舍都在它自己的 `README.zh.md` 里**，本文件只做索引。 |
 | `litearm_vr_moveit_config` | 臂+夹爪合体的 MoveIt 配置：URDF、SRDF、kinematics、限位、控制器清单、RViz 视图。 |
 
-> **语言约定**：代码注释与英文 `README.md` 是英文；本文件与 `docs/QUICKSTART.zh.md`
+> **语言约定**：代码注释与英文 `README.md` 是英文；本文件与 `docs/quickstart.zh-CN.md`
 > 是中文文档。两边不一致时以英文为准。
 
 ---
 
 ## 快速上手
 
-看 [`docs/QUICKSTART.zh.md`](docs/QUICKSTART.zh.md)（5 分钟：构建 → 起栈 → 接头显 → 没有头显
+看 [`docs/quickstart.zh-CN.md`](docs/quickstart.zh-CN.md)（5 分钟：构建 → 起栈 → 确认控制器 → 接头显 → 没有头显
 也能自测 → 排障清单）。
 
 ## 构建
@@ -67,13 +67,13 @@ Quest 3 WebXR 页面（~72 Hz，ws 明文 JSON）
 
 ## 为什么是 forward 控制器，而且必须同时写速度
 
-本机固件把指令帧里的 velocity 当**位置参考的斜坡上限**。只认领 `position` 的控制器会让
+该固件把指令帧里的 velocity 当**位置参考的斜坡上限**。只认领 `position` 的控制器会让
 velocity 接口停在硬件初始值 0 上 —— 于是参考被冻结，**臂收下指令但一步不动，且不报任何错**。
 所以 `VrForwardController` 派生自 `forward_command_controller::ForwardControllersBase`
 （它确实是一个 forward 控制器：指令流进、硬件接口出、没有轨迹也没有目标），但覆盖
 `update()` 把两条接口一起写。
 
-细节与另外两处必须覆盖的地方（本机 ros2_control 2.54.2 的两条坑）见包内
+细节与另外两处必须覆盖的地方（ros2_control 2.54.2 的两条坑）见包内
 [`README.zh.md`](litearm_vr_teleop/README.zh.md)。
 
 ## 测试
@@ -86,11 +86,3 @@ colcon test-result
 C++ 侧覆盖增量映射、关节滤波、点到点轮廓（在理想被控对象上）；Python 侧覆盖帧解析的容错
 与回调交接。测试证明不了「栈能跑」——那是两个 launch 的事；测试证明的是「符号写反了/增益
 算错了，在到电机之前就被抓住」。
-
-## 来源
-
-头显通信与遥操映射移植自参考实现 `vr_control`（`metavr/scripts/ws_echo_server.py`、
-`metavr/src/litearm_teleop/teleop_sim.py`，以及跟随服务的限速）。移植过来的数字都是**实测
-值**，用到的地方都注明了来源；它们不是在本仓推导出来的。凡本栈刻意与参考实现不同的地方，
-注释里都写了差异与理由（最典型的是关节低通滤波放在「每周期步长」而不是「绝对目标」上，
-因为放在绝对目标上会让跟随增益变成滤波系数 —— 实测 12 cm 手柄位移只走出 8 cm）。
