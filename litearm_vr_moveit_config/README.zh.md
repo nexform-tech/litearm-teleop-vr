@@ -120,9 +120,9 @@ SRDF 让 MoveIt 能按名字用它；`litearm_vr_teleop` 的 C++ 侧把同一组
 
 - **臂**：来自 `litearm` 描述包（`litearm_ros2_control/urdf/litearm.urdf.xacro` 转出）。
 - **夹爪**：几何按 `litearm_manipulation/urdf/litearm_gripper.urdf.xacro` 逐字复制。该文件重述
-  `litegrip_urdf` 的 CAD 运动学，唯一原因是 **link 名冲突**（上游把夹爪本体也叫 `base_link`，与
+  `litegrip_description` 的 CAD 运动学，唯一原因是 **link 名冲突**（上游把夹爪本体也叫 `base_link`，与
   臂根同名），所以夹爪 link 统一加 `gripper_` 前缀，mesh 仍直接引用
-  `package://litegrip_urdf/meshes/*.STL`，不复制网格。
+  `package://litegrip_description/meshes/*.STL`，不复制网格。
 - **去掉了相机子树**（`camera_body_link` / `camera_mount_joint` / `camera_collision`）：本栈没有
   相机。改动几何时若要参照上游文件，注意别把这块带回来。
 
