@@ -1,8 +1,13 @@
 # litearm_vr_moveit_config（中文）
 
-「七轴 LiteArm + LiteGrip 夹爪」合体的 MoveIt 2 配置包。它不是复用臂的 MoveIt 配置，
-而是**参照 `litearm_manipulation` 新写的一份**：那个包同时背着相机、识别、MTC，本仓只要
-描述与求解器配置。
+「七轴 LiteArm + LiteGrip 夹爪」合体机器人的**描述与求解器配置**。
+
+本包**不做规划**：不起 `move_group`，没有 OMPL 流水线、没有下发控制器表、也没有规划用关节限位
+—— 遥操栈要的是三样东西：一份 `robot_description`、一份 `robot_description_semantic`（规划组
+就定义在里面，命令数组的关节顺序也钉在它上），以及 `plugin` 后端要用的求解器调参。名字里的
+`moveit_config` 是历史：留下的 `srdf/` 与 `config/kinematics.yaml` 都是 MoveIt 的文件格式，
+而 `urdf/`、`rviz/` 与描述包探测是这个包自己的活。要跑 MoveIt 规划的话，臂那份
+（`litearm_moveit_config`）才是入口，它自带 OMPL 与 `move_group` 需要的全套配置。
 
 > 代码注释为英文；本文件是中文文档，与英文侧不一致时以注释为准。
 > 使用者是 `litearm_vr_teleop`，快速上手见仓库根的 [`QUICKSTART.zh.md`](../docs/QUICKSTART.zh.md)。
@@ -14,10 +19,9 @@
 | `urdf/litearm_vr.urdf.xacro` | 合体机器人描述：臂 + 夹爪几何 + **ros2_control 硬件块**（见下） |
 | `srdf/litearm_vr.srdf.xacro` | 语义描述：`litearm_arm` 组 + `gripper` 组 + 命名位形 + 碰撞矩阵 |
 | `config/kinematics.yaml` | 求解器与它的调参（SNS-IK） |
-| `config/joint_limits.yaml` | 规划用关节限位（值来自固件参数表，不是 URDF 原始值） |
-| `config/ompl_planning.yaml` | OMPL 规划流水线参数 |
-| `config/moveit_controllers.yaml` | MoveIt 看到的下位控制器（本栈不起 `move_group`，此文件为完整性保留） |
 | `rviz/litearm_vr.rviz` | 只有 `RobotModel` + `TF` + `Grid` + `Axes`，固定系 `base_link` |
+
+每个文件**谁在用**见下面「与 `litearm_vr_teleop` 的接口」一节 —— 这张表只回答"仓库里有什么"。
 
 ## 硬件块的开关：`use_mock_hardware`
 
