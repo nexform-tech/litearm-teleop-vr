@@ -205,5 +205,110 @@ TEST(ForwardCommand, HoldsTheVelocityBetweenCommandArrivals)
   }
 }
 
+/// A sender that knows the speed it is asking for has it written verbatim.
+///
+/// This is the difference between a ceiling and a guess at one. The teleoperation
+/// node runs the rate limiter, so the speed it wants the reference slewed at is a
+/// number it already has; deriving it here instead would replace that number with
+/// the difference of two commands over the interval between their arrivals, which
+/// is measured on this loop's clock and carries the arrival jitter.
+TEST(ForwardCommand, WritesTheVelocityTheSenderStated)
+{
+  ForwardCommandTracker tracker = makeTracker(1.0, 0.2);
+  const Eigen::VectorXd measured = Eigen::VectorXd::Zero(2);
+  tracker.reset(measured);
+
+  Eigen::VectorXd positions = Eigen::VectorXd::Zero(2);
+  Eigen::VectorXd velocities = Eigen::VectorXd::Zero(2);
+
+  // The step would derive to 10 rad/s (0.1 rad in one 10 ms cycle) and the
+  // stated figure is well under the ceiling, so nothing here agrees by accident.
+  const Eigen::VectorXd target = (Eigen::VectorXd(2) << 0.1, -0.05).finished();
+  const Eigen::VectorXd stated = (Eigen::VectorXd(2) << 0.3, -0.2).finished();
+  const bool holding =
+    tracker.update(&target, &stated, measured, 0.0, true, kCycleSeconds, positions, velocities);
+
+  EXPECT_FALSE(holding);
+  EXPECT_TRUE(positions.isApprox(target));
+  EXPECT_NEAR(velocities(0), 0.3, 1e-12);
+  EXPECT_NEAR(velocities(1), -0.2, 1e-12);
+}
+
+/// A stated velocity is a request, and the ceiling still applies to it.
+///
+/// The sender's figure is what the reference should be slewed at, so a sender
+/// asking for more than this controller allows gets the smaller of the two: the
+/// firmware's speed limit is a fault rather than a slow-down, and the limit here
+/// exists so a bug upstream cannot reach it.
+TEST(ForwardCommand, ClampsAStatedVelocityToTheCeiling)
+{
+  ForwardCommandTracker tracker = makeTracker(0.5, 0.2);
+  const Eigen::VectorXd measured = Eigen::VectorXd::Zero(1);
+  tracker.reset(measured);
+
+  Eigen::VectorXd positions = Eigen::VectorXd::Zero(1);
+  Eigen::VectorXd velocities = Eigen::VectorXd::Zero(1);
+
+  const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.01).finished();
+  const Eigen::VectorXd stated = (Eigen::VectorXd(1) << 4.0).finished();
+  tracker.update(&target, &stated, measured, 0.0, true, kCycleSeconds, positions, velocities);
+
+  EXPECT_NEAR(positions(0), 0.01, 1e-12);
+  EXPECT_NEAR(velocities(0), 0.5, 1e-12);
+}
+
+/// A stated velocity is held between arrivals, exactly as a derived one is.
+///
+/// The two paths differ in where the number comes from, not in when it applies.
+/// A cycle with no arrival has nothing new to say about the ceiling, and writing
+/// zero there is the defect this whole class exists to avoid.
+TEST(ForwardCommand, HoldsAStatedVelocityBetweenArrivals)
+{
+  ForwardCommandTracker tracker = makeTracker(1.0, 0.2);
+  const Eigen::VectorXd measured = Eigen::VectorXd::Zero(1);
+  tracker.reset(measured);
+
+  Eigen::VectorXd positions = Eigen::VectorXd::Zero(1);
+  Eigen::VectorXd velocities = Eigen::VectorXd::Zero(1);
+
+  const Eigen::VectorXd target = (Eigen::VectorXd(1) << 0.02).finished();
+  const Eigen::VectorXd stated = (Eigen::VectorXd(1) << 0.25).finished();
+  tracker.update(&target, &stated, measured, 0.0, true, kCycleSeconds, positions, velocities);
+  ASSERT_NEAR(velocities(0), 0.25, 1e-12);
+
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    velocities.setZero();
+    const bool holding = tracker.update(
+      &target, &stated, measured, kCycleSeconds, false, kCycleSeconds, positions, velocities);
+    EXPECT_FALSE(holding);
+    EXPECT_DOUBLE_EQ(velocities(0), 0.25);
+  }
+}
+
+/// A velocity that belongs to another robot's joints makes the command unusable.
+///
+/// Holding is the only safe answer: the position is this robot's and the ceiling
+/// is not, so following the command would move these joints at a speed that was
+/// worked out for different ones. That a command is refused is reported by the
+/// holding return, and the caller says so in its log.
+TEST(ForwardCommand, RefusesAStatedVelocityOfTheWrongLength)
+{
+  ForwardCommandTracker tracker = makeTracker(1.0, 0.2);
+  const Eigen::VectorXd measured = (Eigen::VectorXd(3) << 0.1, 0.2, 0.3).finished();
+  tracker.reset(measured);
+
+  Eigen::VectorXd positions = Eigen::VectorXd::Zero(3);
+  Eigen::VectorXd velocities = Eigen::VectorXd::Zero(3);
+
+  const Eigen::VectorXd target = (Eigen::VectorXd(3) << 0.2, 0.2, 0.3).finished();
+  const Eigen::VectorXd stated = Eigen::VectorXd::Zero(2);
+  const bool holding =
+    tracker.update(&target, &stated, measured, 0.0, true, kCycleSeconds, positions, velocities);
+
+  EXPECT_TRUE(holding);
+  EXPECT_TRUE(positions.isApprox(measured));
+  EXPECT_TRUE(velocities.isZero(0.0));
+}
+
 }  // namespace
 }  // namespace litearm_vr_teleop

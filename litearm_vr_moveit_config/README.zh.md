@@ -79,7 +79,7 @@ parent link [ee_link] of joint [gripper_mount_joint] not found
 看起来像安装坏了的错。要临时指定别的名字：
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml arm_description_package:=<包名>
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py arm_description_package:=<包名>
 ```
 
 ⚠️ **把 `share/` 目录手工拷进 install 树不会注册包**：`ament index` 里没有它，`$(find)` 照样

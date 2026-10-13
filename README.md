@@ -51,21 +51,20 @@ source install/setup.bash
 
 ## Run
 
-Two entry points, both of which keep away from real hardware:
+One entry point per bench and one switch, `dry_run`, which says whether this run drives hardware or
+simulates it:
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock hardware: nothing can move
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # real protocol, fake firmware on a pty
+ros2 launch litearm_vr_teleop teleop_arm.launch.py            # the arm
+ros2 launch litearm_vr_teleop teleop_gripper.launch.py        # the gripper, arm simulated
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py    # both
+
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py dry_run:=false   # the hardware
 ```
 
-Both start the same controllers and the same nodes; the difference is the last centimetre, and it decides
-what the run can tell you. The virtual launch is for watching the path and checking arithmetic. The sim
-launch runs the real firmware daemon in dry run mode, which is what exercises the command stream rate, the
-firmware's 100 ms watchdog and the two command interfaces. Neither launch can reach an arm: the dry run flag
-is hardcoded, and the shared memory segment is named separately from the arm stack's.
-
-A real hardware launch is a copy of `teleop_sim.launch.xml` with the dry run flag removed and the shared
-memory name changed back. Read "Before real hardware" in the package README before writing one.
+`dry_run` defaults to true, so a launch file run by accident moves nothing. False loads the hardware drivers:
+the arm's component enables its motors at configure and the first grip press returns the arm to its start
+pose. Read "Before real hardware" in the package README before the first of those.
 
 ## Configuration
 
@@ -74,7 +73,7 @@ are worth knowing before a session:
 
 | Parameter | Default | What it decides |
 | --- | --- | --- |
-| `rotation_mode` | `world` | Whether the tool copies the controller's rotation in the world (`world`) or axis for axis in its own frame (`tool`, the previous behaviour). Settable while the node runs. |
+| `control_frame` | `base_link` | Which control logic reads the controller's rotation: the robot base frame (`base_link`, the default) or the tool's own frame (`tool`, the previous behaviour). Each carries its own calibration. Settable while the node runs. |
 | `reference_pose` | `commanded` | Whether the hand's increment is measured against the measured pose (each frame rebuilt from where the arm is, which feeds the solver's own residual back into the target and makes a still hand oscillate) or against the last commanded pose, which is the default: no residual in the loop, and the operator's whole displacement is delivered even while the arm lags, bounded by the lead cap. |
 | `control_rate_hz` | `100.0` | The rate the node aims for. It does not reach it while it solves inverse kinematics per command: about 23 Hz was measured on the reference machine, which is why every `dt`-scaled limit in the config is worth checking against `ros2 topic hz /vr_forward_controller/commands`. |
 

@@ -326,6 +326,46 @@ double TeleopPlanner::minimumSingularValue(const Eigen::VectorXd & joints)
   return svd.singularValues().minCoeff();
 }
 
+Eigen::VectorXd TeleopPlanner::twistToJointVelocity(
+  const Eigen::Vector3d & linear, const Eigen::Vector3d & angular,
+  const Eigen::VectorXd & joints, double damping)
+{
+  const Eigen::Index dof = static_cast<Eigen::Index>(joint_names_.size());
+  if (joints.size() != dof) {
+    return Eigen::VectorXd::Zero(dof);
+  }
+
+  setScratchState(joints);
+  const Eigen::MatrixXd jacobian = scratch_->getJacobian(group_);
+  if (jacobian.rows() != 6 || jacobian.cols() != dof) {
+    // A Jacobian that is not the six rows this cartesian command needs is a
+    // configuration error, not something to paper over with a partial answer.
+    return Eigen::VectorXd::Zero(dof);
+  }
+
+  Eigen::Matrix<double, 6, 1> twist;
+  twist.head<3>() = linear;
+  twist.tail<3>() = angular;
+
+  // The damped inverse, the same expression the damped position solver uses:
+  // dq = J^T (J J^T + lambda^2 I)^-1 twist.
+  const double damped = std::max(1e-6, damping);
+  const Eigen::Matrix<double, 6, 6> jjt =
+    jacobian * jacobian.transpose() +
+    Eigen::Matrix<double, 6, 6>::Identity() * damped * damped;
+  const Eigen::Matrix<double, 6, 6> jjt_inverse =
+    jjt.ldlt().solve(Eigen::Matrix<double, 6, 6>::Identity());
+  const Eigen::VectorXd velocity = jacobian.transpose() * (jjt_inverse * twist);
+
+  if (!velocity.allFinite()) {
+    // An ill conditioned inverse can produce a vector of nan rather than a large
+    // number, and a nan joint speed would reach the hardware as a nan position.
+    // Standing still is the only safe answer.
+    return Eigen::VectorXd::Zero(dof);
+  }
+  return velocity;
+}
+
 TeleopPlanner::Solution TeleopPlanner::solve(
   const Eigen::Vector3d & position, const Eigen::Matrix3d & rotation, const Eigen::VectorXd & seed)
 {

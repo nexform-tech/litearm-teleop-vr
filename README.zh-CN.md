@@ -36,18 +36,17 @@ source install/setup.bash
 ## 运行
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # 虚拟硬件（mock），什么真东西都不碰
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # 假固件 + 真协议链路
+ros2 launch litearm_vr_teleop teleop_arm.launch.py            # 只手臂
+ros2 launch litearm_vr_teleop teleop_gripper.launch.py        # 只夹爪（手臂仿真）
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py    # 手臂 + 夹爪
+
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py dry_run:=false   # 驱动硬件
 ```
 
-**两个 launch 不能互相替代**，它们各自回答不同的问题：
-
-- `teleop_virtual` 把被控对象换成 `mock_components/GenericSystem`：没有固件、没有守护
-  进程、没有共享内存、没有协议，臂「即时到位」。用它看**算术**：轴方向对不对、回不回得到
-  起点姿态、夹爪开合、松手会不会漂。
-- `teleop_sim` 起真的固件守护进程，只是固件是 pty 上的假固件：真协议、真帧、真 100 Hz
-  上报，串口与 CAN 一个都不开。用它看**只有真链路才存在的行为**：固件收不收这条指令流、
-  指令流连不连续（固件有 100 ms 看门狗）、以及 `position` 与 `velocity` 是不是都写对了
+**一个台架一个入口，一个开关。** `dry_run` 默认 true = 仿真（`mock_components`，不开串口、不开
+can0，臂「即时到位」，用来看**算术**：轴方向、起点姿态、夹爪开合、松手会不会漂）。`dry_run:=false`
+= 硬件驱动：臂的直连组件在 configure 时使能电机，第一次按握把会把臂送回起始姿态 —— 所以先读包内
+README 的 "Before real hardware"。不控制的设备仍然保持仿真，原因在包内 README 里
   —— **只写位置的 forward 控制器在这条路上「收指令但一动不动」**。
 
 两者都**不可能**碰真机：dry run 是硬编码的（不是可传参数），共享内存段也单独命名

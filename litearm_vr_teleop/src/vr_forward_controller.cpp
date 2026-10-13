@@ -266,9 +266,11 @@ controller_interface::CallbackReturn VrForwardController::on_activate(
   const Eigen::Index count = static_cast<Eigen::Index>(joint_names_.size());
   measured_ = Eigen::VectorXd::Zero(count);
   target_ = Eigen::VectorXd::Zero(count);
+  target_velocity_ = Eigen::VectorXd::Zero(count);
   command_positions_ = Eigen::VectorXd::Zero(count);
   command_velocities_ = Eigen::VectorXd::Zero(count);
   has_target_ = false;
+  noted_derived_velocity_ = false;
 
   for (Eigen::Index i = 0; i < count; ++i) {
     measured_(i) = position_states_[static_cast<std::size_t>(i)].get().get_value();
@@ -319,20 +321,51 @@ controller_interface::return_type VrForwardController::update(
 
   const auto rt_command = rt_command_ptr_.readFromRT();
   const CmdType * incoming = (rt_command != nullptr && *rt_command) ? rt_command->get() : nullptr;
-  if (incoming != nullptr && incoming->data.size() != count) {
-    // A wrong sized command is a publisher bug. Holding and saying so once per
-    // few seconds is better than writing whatever happens to fit, which would
-    // move the wrong joint or leave part of the arm behind.
-    RCLCPP_ERROR_THROTTLE(
-      get_node()->get_logger(), *get_node()->get_clock(), 2000,
-      "command has %zu values but %zu joints are configured; ignoring it and holding",
-      incoming->data.size(), count);
-    incoming = nullptr;
+  bool has_stated_velocity = false;
+  if (incoming != nullptr) {
+    // Two layouts are accepted, and the message itself says which one it is:
+    // one value per joint, or a position and the velocity to carry it for every
+    // joint. The second is what this stack's own node publishes, because it runs
+    // the rate limiter and therefore knows the speed it is asking for; a
+    // publisher that has only positions to give still works, and the velocity is
+    // then derived from its stream.
+    has_stated_velocity = incoming->data.size() == 2 * count;
+    if (incoming->data.size() != count && !has_stated_velocity) {
+      // A wrong sized command is a publisher bug. Holding and saying so once per
+      // few seconds is better than writing whatever happens to fit, which would
+      // move the wrong joint or leave part of the arm behind.
+      RCLCPP_ERROR_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 2000,
+        "command has %zu values but %zu joints are configured; expected %zu (positions) or %zu "
+        "(positions then velocities). Ignoring it and holding",
+        incoming->data.size(), count, count, 2 * count);
+      incoming = nullptr;
+      // The cached setpoint from the last good command is still the one written,
+      // so the velocity that belongs to it is the derived one: the stated field
+      // was meant for values this cycle is refusing.
+      has_stated_velocity = false;
+    }
   }
 
   if (incoming != nullptr) {
     for (std::size_t i = 0; i < count; ++i) {
       target_(static_cast<Eigen::Index>(i)) = incoming->data[i];
+    }
+    if (has_stated_velocity) {
+      for (std::size_t i = 0; i < count; ++i) {
+        target_velocity_(static_cast<Eigen::Index>(i)) = incoming->data[count + i];
+      }
+    } else if (!noted_derived_velocity_) {
+      // Said once per activation, not per cycle: a position only publisher works
+      // and is not an error, but it is worth knowing why the ceiling moves on
+      // its own - this controller is then differentiating the stream, and that
+      // derivation carries the arrival interval measured on this loop's clock.
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "commands carry positions only; the slew ceiling is being derived from the interval "
+        "between arrivals. Publishing %zu values (positions then velocities) states it instead",
+        2 * count);
+      noted_derived_velocity_ = true;
     }
     has_target_ = true;
   }
@@ -341,16 +374,17 @@ controller_interface::return_type VrForwardController::update(
   const double command_age = (receipt != nullptr && *receipt >= 0.0) ?
     (monotonicSeconds() - *receipt) : -1.0;
 
-  // The interval the step from the previous setpoint to this one happened over,
-  // which is what the velocity field means: the firmware reads it as the slew
-  // ceiling of the position reference. Using the control period instead inflates
-  // the request whenever the command stream is slower than the controller, and
-  // it is: the teleoperation node solves inverse kinematics per command, so it
-  // runs at tens of Hz while this loop runs at 100. At 23 Hz a 0.02 rad step
-  // became 2.0 rad/s instead of 0.46, which the ceiling then clipped to 1.0 -
-  // every step asked for full speed. The interval between arrivals is measured
-  // from the receipt times, and floored so that a burst of commands cannot ask
-  // for an unbounded velocity.
+  // The interval the step from the previous setpoint to this one happened over.
+  // Only a position only publisher needs it, because it is only then that the
+  // velocity has to be derived: the firmware reads that field as the slew
+  // ceiling of the position reference, so the honest derived value is the step
+  // over the time the sender took to make it. Using the control period instead
+  // inflates the request whenever the command stream is slower than the
+  // controller. At 23 Hz a 0.02 rad step became 2.0 rad/s instead of 0.46, which
+  // the ceiling then clipped to 1.0 - every step asked for full speed. The
+  // interval between arrivals is measured from the receipt times, and floored so
+  // that a burst of commands cannot ask for an unbounded velocity. When the
+  // publisher states the velocity, this figure is not used at all.
   double command_interval = period.seconds();
   bool new_command = false;
   if (receipt != nullptr && *receipt >= 0.0 && *receipt != last_command_receipt_) {
@@ -369,7 +403,8 @@ controller_interface::return_type VrForwardController::update(
   // already put the tracker at the measured pose, so passing a null target here
   // is a hold, not a move to zero.
   tracker_->update(
-    has_target_ ? &target_ : nullptr, measured_, command_age, new_command, command_interval,
+    has_target_ ? &target_ : nullptr, has_stated_velocity ? &target_velocity_ : nullptr,
+    measured_, command_age, new_command, command_interval,
     command_positions_, command_velocities_);
 
   for (std::size_t i = 0; i < count; ++i) {

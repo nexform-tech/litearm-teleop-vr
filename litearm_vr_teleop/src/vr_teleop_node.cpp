@@ -11,15 +11,24 @@
 //   VrForwardController  the hardware path: position plus the velocity that makes
 //                        the position reachable on this arm.
 //
-// The node runs a fixed rate control loop rather than reacting to each headset
-// frame. Frames arrive when the headset feels like it (about 72 Hz, with jitter);
-// the controller and the firmware want a steady stream at a rate the node
-// chooses. Between two frames the loop keeps solving against the SAME absolute
-// Cartesian target, which is idempotent: the target does not depend on how many
-// cycles have passed since it was computed, so re-solving cannot accumulate
-// motion. That property is what makes a fixed rate loop safe here, and it is why
-// the increment mapping takes the measured end effector pose as an input instead
-// of keeping a running target of its own.
+// The target advances on the node's clock, not on the headset's. Frames arrive
+// when the headset feels like it (about 72 Hz, with jitter, and fewer when the
+// WiFi is busy), and a tick at the control rate decides when the hand's motion is
+// folded into the Cartesian target and when the inverse kinematics is asked
+// again. The headset's rate therefore decides only how fresh the pose in that
+// step is, which is what keeps the link's timing out of the command stream.
+//
+// Between two frames the target is advanced by the increment the mapper has
+// averaged over its window, so the step that reaches the controller is one
+// control period long rather than one arrival long. That matters downstream
+// because the controller writes the difference between two commands into the
+// field the firmware reads as the slew ceiling of its position reference: a step
+// whose size follows the link's jitter becomes a ceiling that jitters, and a
+// ceiling that jitters is a reference that moves at a jittering speed.
+//
+// Re-solving cannot accumulate motion, which is what makes a fixed rate loop
+// safe here: the target is an absolute pose derived from the operator's
+// displacement, not a per-cycle delta added to whatever the last cycle produced.
 
 #include <algorithm>
 #include <chrono>
@@ -76,6 +85,28 @@ public:
   using GripperCommand = control_msgs::action::GripperCommand;
   using GripperCommandGoalHandle = rclcpp_action::Client<GripperCommand>::GoalHandle;
 
+  /// How following is done, which is a choice of control law rather than of
+  /// tuning.
+  ///
+  /// kVelocity hands the loop the hand's speed and integrates it against this
+  /// node's clock, which is MoveIt Servo's arrangement: the joint command is a
+  /// velocity the Jacobian answers directly, so nothing has to be chased and
+  /// nothing has to be differentiated by whoever consumes the command. It is the
+  /// default because on this arm the field the firmware reads as the slew ceiling
+  /// of its position reference is then the loop's own output, produced this
+  /// cycle, rather than a reconstruction from two positions.
+  ///
+  /// kPosition is the previous behaviour: an absolute Cartesian target, solved by
+  /// the configured kinematics plugin, with the joint filter easing towards the
+  /// answer. It is kept because it is what was measured on hardware, and because
+  /// a rig may want a target the arm cannot reach yet to be carried rather than
+  /// integrated - see `reference_pose`. Switching is a launch argument.
+  enum class FollowMode
+  {
+    kVelocity,
+    kPosition,
+  };
+
   /// What the node is doing. The transitions are where the safety lives, so they
   /// are all in one place (`tick`).
   enum class Phase
@@ -117,6 +148,14 @@ public:
     mapper_ = std::make_unique<TeleopIncrementMapper>(buildAxisMapping(), teleop_limits_);
     filter_ = std::make_unique<JointTargetFilter>(teleop_limits_, joint_names_.size());
     limiter_ = std::make_unique<JointRateLimiter>(rate_limits_, joint_names_.size());
+    // The velocity mode's profile, built from the same two ceilings the position
+    // mode's limiter uses and one smoothing constant of its own: the numbers an
+    // operator has already had tuned against the arm should not have to be tuned
+    // twice for choosing the other control law.
+    velocity_limits_.max_velocity = rate_limits_.max_velocity;
+    velocity_limits_.max_acceleration = rate_limits_.max_acceleration;
+    velocity_profile_ =
+      std::make_unique<JointVelocityProfile>(velocity_limits_, joint_names_.size());
 
     // The mapping is settable while the node runs, because the only person who
     // can tell whether a sign is right is the one holding the controller, and
@@ -226,10 +265,20 @@ public:
       "pull the trigger to close the gripper");
     RCLCPP_INFO(
       get_logger(),
-      "controller rotation is read in the %s frame, signs [%.2f %.2f %.2f]; "
-      "'ros2 param set /vr_teleop rotation_mode tool' and 'ros2 param set /vr_teleop "
-      "rotation_signs [a, b, c]' change it while this node runs",
-      rotation_mode_name_.c_str(), rotation_signs_.x(), rotation_signs_.y(), rotation_signs_.z());
+      "control logic '%s': signs [%.2f %.2f %.2f] (base_link [%.2f %.2f %.2f], tool [%.2f %.2f "
+      "%.2f]); 'ros2 param set /vr_teleop control_frame tool' and 'ros2 param set /vr_teleop "
+      "base_link_rotation_signs [a, b, c]' change them while this node runs",
+      control_frame_name_.c_str(), selectedSigns().x(), selectedSigns().y(), selectedSigns().z(),
+      base_link_rotation_signs_.x(), base_link_rotation_signs_.y(), base_link_rotation_signs_.z(),
+      tool_rotation_signs_.x(), tool_rotation_signs_.y(), tool_rotation_signs_.z());
+    if (follow_mode_ == FollowMode::kVelocity) {
+      RCLCPP_INFO(
+        get_logger(),
+        "following in the velocity form: the hand's twist goes through the damped Jacobian and a "
+        "%.0f ms low pass, and the position written beside it is that speed integrated at %.1f Hz "
+        "(parameter follow_mode; 'position' selects the older target-and-solver path)",
+        velocity_limits_.filter_tau * 1000.0, control_rate_hz_);
+    }
     RCLCPP_INFO(
       get_logger(),
       "hand increments are measured against the %s pose, target margin %.0f mm / %.2f mrad, "
@@ -277,7 +326,7 @@ private:
     start_pose_accel_ = readParameter<double>("start_pose_accel", kStartPoseAccel);
 
     // The point of the tool that follows the hand, as an offset from tip_link in
-    // the tip frame (config/tcp.yaml). Defaults to the current gripper's
+    // the tip frame (config/vr_teleop.yaml). Defaults to the current gripper's
     // flange-to-grasp-point distance.
     const std::vector<double> tcp_offset =
       readParameter<std::vector<double>>("tcp_offset", std::vector<double>{0.0, 0.0, 0.18});
@@ -291,12 +340,20 @@ private:
     }
 
     TeleopPlanner::Options planner_options;
-    const std::string backend = readParameter<std::string>("ik_backend", "plugin");
-    if (backend == "dls") {
+    // dls unless asked otherwise: in process, deterministic and fast enough to run
+    // per target, where the plugin's latency and its restart inside the null space
+    // are both things a following task has to work around. The plugin is kept
+    // because a rig may want the solver it tuned, and because the two can be
+    // compared on the same arm.
+    const std::string backend = readParameter<std::string>("ik_backend", "dls");
+    if (backend == "plugin") {
+      planner_options.backend = TeleopPlanner::IkBackend::kPlugin;
+    } else {
+      if (backend != "dls") {
+        RCLCPP_WARN(
+          get_logger(), "ik_backend '%s' is not a backend; using 'dls'", backend.c_str());
+      }
       planner_options.backend = TeleopPlanner::IkBackend::kDls;
-    } else if (backend != "plugin") {
-      RCLCPP_WARN(
-        get_logger(), "ik_backend '%s' is not a backend; using 'plugin'", backend.c_str());
     }
     planner_options.group_name = readParameter<std::string>("group_name", "litearm_arm");
     planner_options.base_frame = readParameter<std::string>("base_frame", "base_link");
@@ -314,8 +371,8 @@ private:
     teleop_limits_.max_step_rad = readParameter<double>("max_step_rad", 0.08);
     teleop_limits_.max_joint_velocity = readParameter<double>("max_joint_velocity", 2.0);
     teleop_limits_.low_pass_tau = readParameter<double>("low_pass_tau", 0.02);
-    teleop_limits_.moving_average_frames = static_cast<std::size_t>(
-      std::max(1, readParameter<int>("moving_average_frames", 10)));
+    teleop_limits_.moving_average_samples = static_cast<std::size_t>(
+      std::max(1, readParameter<int>("moving_average_samples", 10)));
 
     // The motion profile of the command stream: how fast the joints may move,
     // how fast that speed may change, and how fast the change of speed may
@@ -326,33 +383,59 @@ private:
       readParameter<double>("max_joint_acceleration", rate_limits_.max_acceleration);
     rate_limits_.max_jerk = readParameter<double>("max_joint_jerk", rate_limits_.max_jerk);
 
+    // Which control law follows the hand. See FollowMode: `velocity` is the
+    // default, `position` is the previous behaviour and is kept so the two can be
+    // compared on the same rig without a rebuild.
+    const std::string follow_mode = readParameter<std::string>("follow_mode", "velocity");
+    if (follow_mode == "velocity") {
+      follow_mode_ = FollowMode::kVelocity;
+    } else if (follow_mode == "position") {
+      follow_mode_ = FollowMode::kPosition;
+    } else {
+      RCLCPP_WARN(
+        get_logger(), "follow_mode '%s' is not a mode; using 'velocity'",
+        follow_mode.c_str());
+      follow_mode_ = FollowMode::kVelocity;
+    }
+
+    // The velocity mode's smoothing: the time constant of the low pass on the
+    // commanded joint speed. Servo carries the same filter as a per iteration
+    // coefficient; a time constant is used because this loop measures its
+    // interval, and a coefficient would mean a different cutoff on every late
+    // tick. Zero leaves the acceleration ceiling to shape the command alone.
+    velocity_limits_.filter_tau = readParameter<double>("velocity_filter_tau", 0.03);
+
+    // How far below the press threshold the trigger has to fall before the release
+    // counts. Zero restores the bare threshold, and with it the oscillation.
+    trigger_hysteresis_ = readParameter<double>("trigger_hysteresis", 0.1);
+
+    // How far the integrated reference may run ahead of the arm, per joint. The
+    // joint space counterpart of max_target_lead_m, and it exists because the
+    // velocity form integrates: a lagging arm plus an operator who keeps pushing
+    // would otherwise wind the reference out to a joint limit and hold it there.
+    max_joint_lead_rad_ = readParameter<double>("max_joint_lead_rad", 0.2);
+
     // Below this Jacobian minimum singular value the configured solver's answer
     // jumps between configurations, so the damped backend answers instead. Zero
     // turns the guard off.
     damping_singular_value_ = readParameter<double>("damping_singular_value", 0.05);
 
-    // How the controller's rotation reaches the tool. `world` is the geometric
-    // default: the tool turns about the same world axis as the controller,
-    // whatever pose the arm is in. `tool` is the previous behaviour, kept
-    // because a rig that was calibrated for it can ask for it back.
-    rotation_mode_name_ = readParameter<std::string>("rotation_mode", "world");
-    if (rotation_mode_name_ != "world" && rotation_mode_name_ != "tool") {
+    // Which control logic the hand's rotation is read in, and that logic's own
+    // calibration. `base_link` carries the increment into the robot base frame and
+    // applies it there; `tool` reads it in the controller's own frame and applies it
+    // in the tool's. The two read the same three numbers in different frames, which
+    // is why each has its own signs rather than sharing one. See
+    // config/vr_teleop.yaml for the measured values and what was seen on the rig.
+    control_frame_name_ = readParameter<std::string>("control_frame", "base_link");
+    if (control_frame_name_ != "base_link" && control_frame_name_ != "tool") {
       RCLCPP_WARN(
-        get_logger(), "rotation_mode '%s' is not a mode; using 'world'",
-        rotation_mode_name_.c_str());
-      rotation_mode_name_ = "world";
+        get_logger(), "control_frame '%s' is not a control logic; using 'base_link'",
+        control_frame_name_.c_str());
+      control_frame_name_ = "base_link";
     }
-    const std::vector<double> default_signs{1.0, 1.0, 1.0};
-    const std::vector<double> rotation_signs =
-      readParameter<std::vector<double>>("rotation_signs", default_signs);
-    if (rotation_signs.size() != 3u) {
-      RCLCPP_WARN(
-        get_logger(), "rotation_signs needs three numbers, got %zu; using [1 1 1]",
-        rotation_signs.size());
-      rotation_signs_ = Eigen::Vector3d::Ones();
-    } else {
-      rotation_signs_ = Eigen::Vector3d(rotation_signs[0], rotation_signs[1], rotation_signs[2]);
-    }
+    base_link_rotation_signs_ =
+      readSigns("base_link_rotation_signs", std::vector<double>{-1.0, -1.0, 1.0});
+    tool_rotation_signs_ = readSigns("tool_rotation_signs", std::vector<double>{1.0, -1.0, -1.0});
 
     // What the increment mapping measures against, and how far the target may
     // run ahead of the arm. See config/vr_teleop.yaml for what each mode is for;
@@ -404,6 +487,29 @@ private:
     start_pose_ = Eigen::VectorXd::Map(start_pose.data(), start_pose.size());
   }
 
+  /// Read one control logic's three number calibration.
+  ///
+  /// A sign vector that is not three numbers is a configuration mistake that would
+  /// otherwise reach the mapping as a short or padded vector, so it is refused here
+  /// with the fallback named in the message rather than silently reshaped.
+  Eigen::Vector3d readSigns(const std::string & name, const std::vector<double> & fallback)
+  {
+    const std::vector<double> values = readParameter<std::vector<double>>(name, fallback);
+    if (values.size() != 3u) {
+      RCLCPP_WARN(
+        get_logger(), "%s needs three numbers, got %zu; using [%.0f %.0f %.0f]", name.c_str(),
+        values.size(), fallback[0], fallback[1], fallback[2]);
+      return Eigen::Vector3d(fallback[0], fallback[1], fallback[2]);
+    }
+    return Eigen::Vector3d(values[0], values[1], values[2]);
+  }
+
+  /// The calibration the selected control logic reads in.
+  Eigen::Vector3d selectedSigns() const
+  {
+    return control_frame_name_ == "tool" ? tool_rotation_signs_ : base_link_rotation_signs_;
+  }
+
   /// The mapping the parameters describe, on top of the measured baseline.
   ///
   /// The baseline carries the frame correspondence, which is a property of where
@@ -415,8 +521,10 @@ private:
   {
     AxisMapping mapping = singleArmUprightMapping();
     mapping.rotation_mode =
-      rotation_mode_name_ == "tool" ? RotationMapping::kTool : RotationMapping::kWorld;
-    mapping.rotation_signs = rotation_signs_;
+      control_frame_name_ == "tool" ? RotationMapping::kTool : RotationMapping::kBaseLink;
+    // The selected logic's own calibration, and nothing else: the two read the same
+    // three numbers in different frames, which is why there are two of them.
+    mapping.rotation_signs = selectedSigns();
     return mapping;
   }
 
@@ -431,28 +539,35 @@ private:
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
 
-    std::string mode = rotation_mode_name_;
-    Eigen::Vector3d signs = rotation_signs_;
+    std::string mode = control_frame_name_;
+    Eigen::Vector3d base_link_signs = base_link_rotation_signs_;
+    Eigen::Vector3d tool_signs = tool_rotation_signs_;
     bool mapping_changed = false;
 
     for (const rclcpp::Parameter & parameter : parameters) {
-      if (parameter.get_name() == "rotation_mode") {
+      const std::string & name = parameter.get_name();
+      if (name == "control_frame") {
         const std::string requested = parameter.as_string();
-        if (requested != "world" && requested != "tool") {
+        if (requested != "base_link" && requested != "tool") {
           result.successful = false;
-          result.reason = "rotation_mode must be 'world' or 'tool', not '" + requested + "'";
+          result.reason = "control_frame must be 'base_link' or 'tool', not '" + requested + "'";
           return result;
         }
         mode = requested;
         mapping_changed = true;
-      } else if (parameter.get_name() == "rotation_signs") {
+      } else if (name == "base_link_rotation_signs" || name == "tool_rotation_signs") {
         const std::vector<double> requested = parameter.as_double_array();
         if (requested.size() != 3u) {
           result.successful = false;
-          result.reason = "rotation_signs needs three numbers";
+          result.reason = name + " needs three numbers";
           return result;
         }
-        signs = Eigen::Vector3d(requested[0], requested[1], requested[2]);
+        const Eigen::Vector3d signs(requested[0], requested[1], requested[2]);
+        if (name == "base_link_rotation_signs") {
+          base_link_signs = signs;
+        } else {
+          tool_signs = signs;
+        }
         mapping_changed = true;
       }
     }
@@ -461,16 +576,17 @@ private:
       return result;
     }
 
-    rotation_mode_name_ = mode;
-    rotation_signs_ = signs;
+    control_frame_name_ = mode;
+    base_link_rotation_signs_ = base_link_signs;
+    tool_rotation_signs_ = tool_signs;
     if (mapper_ != nullptr) {
       mapper_->setMapping(buildAxisMapping());
     }
     RCLCPP_WARN(
       get_logger(),
-      "rotation mapping changed to mode '%s' signs [%.2f %.2f %.2f]; it applies from the next "
-      "headset frame, and the arm holds its target until then",
-      rotation_mode_name_.c_str(), rotation_signs_.x(), rotation_signs_.y(), rotation_signs_.z());
+      "control logic changed to '%s' signs [%.2f %.2f %.2f]; it applies from the next headset "
+      "frame, and the arm holds its target until then",
+      control_frame_name_.c_str(), selectedSigns().x(), selectedSigns().y(), selectedSigns().z());
     return result;
   }
 
@@ -481,8 +597,11 @@ private:
     if (frame->side != "right") {
       // The single arm rig is driven by the right controller. Saying so once is
       // more useful than silently ignoring frames forever.
-      RCLCPP_WARN_ONCE(
-        get_logger(), "ignoring frames for side '%s'; this node follows the right controller",
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "ignoring frames for side '%s': this node follows the right controller, so check that "
+        "the right one is on and tracked - the left one being the only one that reports is "
+        "indistinguishable from a headset that stopped, except by this line",
         frame->side.c_str());
       return;
     }
@@ -503,7 +622,6 @@ private:
       latest_frame_ = *frame;
       last_frame_time_ = steadySeconds();
       latest_frame_valid_ = true;
-      ++frame_sequence_;
     }
   }
 
@@ -541,6 +659,8 @@ private:
     filter_->reset();
     limiter_->reset();
     start_move_.reset();
+    velocity_profile_->reset();
+    have_velocity_position_ = false;
     restartFollow();
     saw_grip_ = false;
     response->success = true;
@@ -602,7 +722,11 @@ private:
         stepReturnToStart(dt);
         break;
       case Phase::kFollowing:
-        stepFollowing(dt);
+        if (follow_mode_ == FollowMode::kVelocity) {
+          stepFollowingVelocity(dt);
+        } else {
+          stepFollowing(dt);
+        }
         break;
     }
   }
@@ -634,6 +758,8 @@ private:
         filter_->reset();
         limiter_->reset();
         start_move_.reset();
+    velocity_profile_->reset();
+    have_velocity_position_ = false;
         restartFollow();
         phase_ = Phase::kIdle;
         RCLCPP_INFO(
@@ -654,7 +780,11 @@ private:
       return;
     }
 
-    const bool pressed = latest_frame_.trigger > trigger_threshold_;
+    // Hysteresis, not a bare threshold: see triggerPressed for the measurement that
+    // made this necessary - an analogue trigger resting on the line produced a
+    // press and a release every half second.
+    const bool pressed = triggerPressed(
+      latest_frame_.trigger, trigger_raw_, trigger_threshold_, trigger_hysteresis_);
     if (pressed != trigger_raw_) {
       trigger_raw_ = pressed;
       trigger_changed_at_ = now;
@@ -696,6 +826,8 @@ private:
     filter_->reset();
     limiter_->reset();
     start_move_.reset();
+    velocity_profile_->reset();
+    have_velocity_position_ = false;
     restartFollow();
     saw_grip_ = false;
     phase_ = Phase::kIdle;
@@ -719,6 +851,8 @@ private:
       measured_, start_pose_, speed, accel, planner_->lowerLimits(), planner_->upperLimits());
     filter_->reset();
     limiter_->reset();
+    velocity_profile_->reset();
+    have_velocity_position_ = false;
     restartFollow();
     phase_ = Phase::kReturningToStart;
     RCLCPP_INFO(
@@ -734,7 +868,9 @@ private:
       return;
     }
     const JointMoveProfile::Point point = start_move_->step(dt);
-    publishPositions(point.position);
+    // The profile carries its own speed, and it is the honest ceiling for this
+    // move: the reference is being asked to travel at it.
+    publishCommand(point.position, point.velocity);
 
     if (!point.done) {
       return;
@@ -765,7 +901,6 @@ private:
   {
     msg::VrControllerFrame frame;
     bool frame_valid = false;
-    std::size_t sequence = 0;
     Eigen::VectorXd measured;
     bool measured_valid = false;
     Phase phase = Phase::kIdle;
@@ -778,7 +913,6 @@ private:
     SolverInput input;
     input.frame = latest_frame_;
     input.frame_valid = latest_frame_valid_;
-    input.sequence = frame_sequence_;
     input.measured = measured_;
     input.measured_valid = have_measured_;
     input.phase = phase_;
@@ -804,51 +938,88 @@ private:
   /// solve delays the target by 70 ms and nothing else.
   void solveLoop()
   {
+    // The target advances on this node's clock, one tick per control period.
+    //
+    // The headset decides WHAT the hand did, never WHEN the target moves. Frames
+    // arrive when the link allows, so a target stepped by each arrival would take
+    // its step size from however long that arrival took - a late frame is a
+    // double step - and the controller, which writes the difference between two
+    // commands into the field the firmware reads as the slew ceiling of its
+    // position reference, would put that jitter into how fast the arm may move.
+    // Ticking here makes every step one control period long, and the headset's
+    // rate then decides only how fresh the pose in that step is. The cost is up
+    // to one tick between the hand moving and the target moving: 10 ms at 100 Hz,
+    // which teleoperation does not notice.
+    ControlTick tick(control_rate_hz_);
     while (running_) {
-      const SolverInput input = takeSolverInput();
-      if (input.generation != solver_generation_) {
-        solver_generation_ = input.generation;
-        processed_sequence_ = 0;
-        clearFollowState();
-        if (input.phase == Phase::kFollowing && input.frame_valid) {
-          mapper_->start(
-            Eigen::Vector3d(
-              input.frame.position.x, input.frame.position.y, input.frame.position.z),
-            Eigen::Quaterniond(
-              input.frame.quaternion.w, input.frame.quaternion.x, input.frame.quaternion.y,
-              input.frame.quaternion.z).normalized());
-        } else {
-          mapper_->reset();
+      if (tick.due(steadySeconds())) {
+        if (follow_mode_ == FollowMode::kVelocity) {
+          // This mode follows on the timer, with the Jacobian in process. The
+          // thread stays alive so that switching back does not need a restart,
+          // and it touches nothing meanwhile: the mapper belongs to whoever is
+          // following.
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          continue;
+        }
+        const SolverInput input = takeSolverInput();
+        if (input.generation != solver_generation_) {
+          solver_generation_ = input.generation;
+          clearFollowState();
+          if (input.phase == Phase::kFollowing && input.frame_valid) {
+            mapper_->start(
+              Eigen::Vector3d(
+                input.frame.position.x, input.frame.position.y, input.frame.position.z),
+              Eigen::Quaterniond(
+                input.frame.quaternion.w, input.frame.quaternion.x, input.frame.quaternion.y,
+                input.frame.quaternion.z).normalized());
+          } else {
+            mapper_->reset();
+          }
+        }
+        if (input.phase == Phase::kFollowing && input.measured_valid) {
+          solveFollowing(input);
         }
       }
-      if (input.phase == Phase::kFollowing && input.measured_valid) {
-        solveFollowing(input);
-      }
+      // The tick is due one period from now and the work above is short, so this
+      // poll interval is what bounds how late a tick may be noticed. A
+      // millisecond keeps that inside a tenth of the period.
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
 
   /// One following step: map the hand, solve, hand the solution over.
+  ///
+  /// Runs once per control tick, which is what fixes the size of a step. The
+  /// mapper is fed the newest frame every tick, so the increment it averages is
+  /// the hand's motion over one control period - zero over the ticks in which no
+  /// frame arrived, and the two frames' worth over the ticks in which two did.
+  /// The moving average then spreads each arrival over its window, which is what
+  /// makes a late frame a slightly slower stream rather than a double step, and
+  /// what keeps the total: the sum of the averaged increments over time is the
+  /// sum of the increments, so the operator's whole displacement still arrives.
   void solveFollowing(const SolverInput & input)
   {
-    // One solve per headset frame, not one per control cycle.
-    //
-    // The Cartesian target only changes when a frame arrives, but the solver was
-    // re-run every cycle against it, seeded from the measured joints. A solver
-    // that is not deterministic - and the SNS plugin is not, its search restarts
-    // within the 7 axis null space - then returns a slightly different answer
-    // for the same target each time, a joint space wobble of a few hundredths of
-    // a radian per cycle. The controller reports that wobble as a velocity,
-    // (q - q_prev) / dt, so 0.01 rad at 100 Hz is 1.0 rad/s: the velocity
-    // interface saturates on a hand that is not moving at all. Between frames
-    // there is nothing new to solve for, so the last solution is republished
-    // instead - the firmware's watchdog wants a continuous stream, not a new
-    // target - and the joint filter keeps easing toward it, which is also what
-    // turns one frame's step into a short ramp instead of a step.
-    const bool new_frame = input.frame_valid && input.sequence != processed_sequence_;
-    if (new_frame) {
-      processed_sequence_ = input.sequence;
+    // Between ticks the target does not move, and a solve is only asked for when
+    // the target has changed - see the deadband below. That is the other half of
+    // solving once per frame rather than once per cycle: a solver that is not
+    // deterministic - and the SNS plugin is not, its search restarts within the
+    // 7 axis null space - returns a slightly different answer for an unchanged
+    // target every time it is asked, a joint space wobble of a few hundredths of
+    // a radian. The controller reports that wobble as a velocity, (q - q_prev) /
+    // dt, so 0.01 rad at 100 Hz is 1.0 rad/s: the velocity interface saturates on
+    // a hand that is not moving at all. So the solution is cached against the
+    // target it was solved for, and republished - the firmware's watchdog wants a
+    // continuous stream, not a new target - while the joint filter keeps easing
+    // toward it, which is what turns one tick's step into a short ramp instead of
+    // a step.
+    if (!input.frame_valid) {
+      // No frame has arrived since following began: there is no pose to map, and
+      // nothing to follow. The timer holds at the measured pose.
+      publishSolution(Eigen::VectorXd(), false);
+      return;
+    }
 
+    {
       Eigen::Vector3d ee_position;
       Eigen::Matrix3d ee_rotation;
       if (!planner_->forwardKinematics(input.measured, ee_position, ee_rotation)) {
@@ -892,8 +1063,10 @@ private:
         {
           cartesian_target_ = bounded;
           have_cartesian_target_ = true;
-          // The cached solution belongs to the target it was solved for.
+          // The cached solution belongs to the target it was solved for, and the
+          // new one has not been through the solver yet.
           have_solution_ = false;
+          solve_pending_ = true;
         }
         reference_pose_ = cartesian_target_;
         have_reference_pose_ = true;
@@ -907,11 +1080,23 @@ private:
     }
 
     if (!have_solution_) {
-      // Seeded with the previous solution when there is one. That matters more
+      // An attempt has been made for this target and did not produce a command -
+      // it was refused as unreachable, or damping was needed and the damped
+      // answer did not converge either. Holding until the target moves is the
+      // right answer on both counts, and asking again on every tick would ask a
+      // solver that has already said no a hundred times a second.
+      publishSolution(Eigen::VectorXd(), false);
+      return;
+    }
+
+    if (solve_pending_) {
+      // One attempt per target, not one per tick. Seeded with the previous
+      // solution when there is one: that matters more
       // than it looks: with the same target and the same seed the solver returns
       // the same answer, so a target that is not moving produces a command that
       // is not moving either, and the redundant axis stays where the last
       // solution put it instead of wandering through the null space.
+      solve_pending_ = false;
       const Eigen::VectorXd & seed = have_commanded_joints_ ? commanded_joints_ : input.measured;
       const Eigen::Vector3d solve_position =
         cartesian_target_.position - cartesian_target_.rotation * tcp_offset_;
@@ -964,6 +1149,114 @@ private:
 
 
 
+  /// One following cycle in the velocity mode.
+  ///
+  /// MoveIt Servo's loop in this arm's terms, and the whole of it: the newest
+  /// frame gives the hand's twist, the damped Jacobian turns that twist into a
+  /// joint speed, the velocity profile smooths and bounds the speed, and the
+  /// position written beside it is that speed integrated against this node's
+  /// clock. Every quantity that reaches the hardware is one this cycle computed,
+  /// so nothing downstream has to be differentiated to be understood - and on
+  /// this arm what downstream does with the velocity is read it as the slew
+  /// ceiling of its own position reference, which is exactly what an integrated
+  /// speed means.
+  ///
+  /// Nothing here goes through the solver thread, which is the other half of the
+  /// point: the Jacobian answers in microseconds where the configured plugin
+  /// takes tens of milliseconds, so the target is as fresh as the tick rather
+  /// than as fresh as the solver, and the plugin's non-determinism - the reason
+  /// the position mode has to cache a solution per target - is not in this path.
+  void stepFollowingVelocity(double dt)
+  {
+    // A new session re-anchors: the hand's motion is measured from the pose of
+    // the frame the grip was pressed on, and the integration starts where the arm
+    // is. Both are what the position mode does through the generation counter, on
+    // the thread that owns them in that mode.
+    if (follow_generation_ != tick_generation_) {
+      tick_generation_ = follow_generation_;
+      velocity_profile_->reset();
+      have_velocity_position_ = false;
+      if (latest_frame_valid_) {
+        mapper_->start(
+          Eigen::Vector3d(
+            latest_frame_.position.x, latest_frame_.position.y, latest_frame_.position.z),
+          Eigen::Quaterniond(
+            latest_frame_.quaternion.w, latest_frame_.quaternion.x, latest_frame_.quaternion.y,
+            latest_frame_.quaternion.z).normalized());
+      } else {
+        mapper_->reset();
+      }
+    }
+
+    if (!latest_frame_valid_) {
+      // Nothing to follow from, and no pose to anchor on. The watchdog has
+      // already said so; the next grip press re-anchors. Said out loud as well:
+      // a hold with no explanation reads as an arm that has stopped listening,
+      // and the operator has no way to tell it from a link that died.
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "velocity following has no frame to follow (the link is quiet or the grip was just "
+        "released): holding");
+      publishHold();
+      return;
+    }
+
+    Eigen::Vector3d ee_position;
+    Eigen::Matrix3d ee_rotation;
+    if (!planner_->forwardKinematics(measured_, ee_position, ee_rotation)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000, "forward kinematics failed; holding");
+      publishHold();
+      return;
+    }
+
+    const CartesianTwist hand_twist = mapper_->feedRate(
+      Eigen::Vector3d(
+        latest_frame_.position.x, latest_frame_.position.y, latest_frame_.position.z),
+      Eigen::Quaterniond(
+        latest_frame_.quaternion.w, latest_frame_.quaternion.x, latest_frame_.quaternion.y,
+        latest_frame_.quaternion.z).normalized(),
+      dt);
+    if (!hand_twist.valid) {
+      // The mapping is not anchored, so there is no hand motion to interpret -
+      // the one way this loop can hold without anything else having gone wrong,
+      // and the one that used to be silent. A grip press anchors it.
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "the hand mapping is not anchored, so no twist can be measured: holding. "
+        "Press the grip to anchor it");
+      publishHold();
+      return;
+    }
+
+    // The operator's hand moves the tool tip; the Jacobian below is the arm's at
+    // the end effector link, so the twist crosses that offset first.
+    const CartesianTwist tool_twist = twistAtOffset(hand_twist, ee_rotation * tcp_offset_);
+    const Eigen::VectorXd wanted = planner_->twistToJointVelocity(
+      tool_twist.linear, tool_twist.angular, measured_, damping_singular_value_);
+    if (!have_velocity_position_) {
+      // The first cycle of a session has no reference to integrate onto, and the
+      // honest seed is where the arm actually is: seeding at zero, or at the last
+      // session's reference, would both be a jump.
+      velocity_position_ = measured_;
+      have_velocity_position_ = true;
+    }
+
+    // Scale the command down when the reference has run ahead of the arm, before
+    // the profile smooths it: this is the guard that stops an integrating
+    // reference from winding up against a lagging arm. See leadScale.
+    const double scale = leadScale(velocity_position_ - measured_, max_joint_lead_rad_);
+    const Eigen::VectorXd commanded = velocity_profile_->apply(wanted * scale, dt);
+    velocity_position_ = integrateJointVelocity(
+      velocity_position_, commanded, dt, planner_->lowerLimits(), planner_->upperLimits());
+
+    // The velocity published is the profile's own output, not a difference of the
+    // positions either side of it. That is what the controller writes into the
+    // field the firmware reads as its slew ceiling, and publishing the loop's own
+    // number is what keeps that ceiling continuous by construction.
+    publishCommand(velocity_position_, velocity_profile_->velocity());
+  }
+
   void stepFollowing(double dt)
   {
     // The command stream is produced here, at the control rate, from whatever the
@@ -984,7 +1277,7 @@ private:
       return;
     }
     const Eigen::VectorXd filtered = filter_->apply(solution, measured_, dt);
-    publishPositions(limiter_->apply(filtered, measured_, dt));
+    publishCommand(limiter_->apply(filtered, measured_, dt), limiter_->velocity());
   }
 
   /// Tell the solver thread that the session it was solving for has ended.
@@ -1010,6 +1303,7 @@ private:
   {
     have_cartesian_target_ = false;
     have_solution_ = false;
+    solve_pending_ = false;
     have_commanded_joints_ = false;
     have_reference_pose_ = false;
   }
@@ -1026,22 +1320,40 @@ private:
     // still: without this, a refused solution or a pause would leave the limiter
     // holding a velocity it was asking for when the last accepted target was
     // still in front of it, and the first command after the hold would start at
-    // that speed instead of from zero.
+    // that speed instead of from zero. That also zeroes the velocity this
+    // publishes beside the position, which is what a hold has to say: this
+    // firmware's only way to stand still is a zero slew ceiling.
     limiter_->reset();
-    publishPositions(measured_);
+    publishCommand(measured_, limiter_->velocity());
   }
 
-  void publishPositions(const Eigen::VectorXd & positions)
+  /// Publish one command: the joint positions to reach, then the joint
+  /// velocities to carry them.
+  ///
+  /// The velocity half is not optional decoration. The firmware reads that field
+  /// as the slew ceiling of its position reference, so a command carrying
+  /// positions alone leaves the ceiling to be derived by the controller - from
+  /// the difference between two commands over the interval between their
+  /// arrivals, which is a number the controller measures on its own clock. This
+  /// node knows the speed it is asking for: it is the rate limiter's own state,
+  /// the speed of the stream it just produced. Sending that removes the
+  /// derivation, and with it the arrival interval, from the only signal the
+  /// firmware uses to decide how fast the arm may move.
+  void publishCommand(const Eigen::VectorXd & positions, const Eigen::VectorXd & velocities)
   {
-    if (command_publisher_ == nullptr ||
-      positions.size() != static_cast<Eigen::Index>(joint_names_.size()))
+    const Eigen::Index count = static_cast<Eigen::Index>(joint_names_.size());
+    if (command_publisher_ == nullptr || positions.size() != count ||
+      velocities.size() != count)
     {
       return;
     }
     std_msgs::msg::Float64MultiArray message;
-    message.data.reserve(joint_names_.size());
-    for (Eigen::Index i = 0; i < positions.size(); ++i) {
+    message.data.reserve(static_cast<std::size_t>(2 * count));
+    for (Eigen::Index i = 0; i < count; ++i) {
       message.data.push_back(positions(i));
+    }
+    for (Eigen::Index i = 0; i < count; ++i) {
+      message.data.push_back(velocities(i));
     }
     command_publisher_->publish(message);
   }
@@ -1092,8 +1404,11 @@ private:
   TeleopLimits teleop_limits_;
   /// Frame the controller's rotation increment is read in, and the per axis
   /// signs applied to it. Both are settable at run time; see onParameterUpdate.
-  std::string rotation_mode_name_ = "world";
-  Eigen::Vector3d rotation_signs_ = Eigen::Vector3d::Ones();
+  std::string control_frame_name_ = "base_link";
+  /// One calibration per control logic. See config/vr_teleop.yaml for the measured
+  /// values and what was seen on the rig when they were set.
+  Eigen::Vector3d base_link_rotation_signs_ = Eigen::Vector3d(-1.0, -1.0, 1.0);
+  Eigen::Vector3d tool_rotation_signs_ = Eigen::Vector3d(1.0, -1.0, -1.0);
   double headset_timeout_s_ = 0.5;
   bool gripper_enabled_ = true;
   std::string gripper_action_;
@@ -1123,7 +1438,7 @@ private:
   Eigen::VectorXd measured_;
   std::atomic<bool> have_measured_{false};
   CartesianTarget cartesian_target_;
-  /// tip_link -> TCP, in the tip frame (config/tcp.yaml).
+  /// tip_link -> TCP, in the tip frame (config/vr_teleop.yaml).
   Eigen::Vector3d tcp_offset_ = Eigen::Vector3d(0.0, 0.0, 0.18);
   bool have_cartesian_target_ = false;
   /// The last joint solution, and whether there is one. Held between headset
@@ -1131,7 +1446,25 @@ private:
   /// command wobble (see stepFollowing).
   Eigen::VectorXd commanded_joints_;
   bool have_commanded_joints_ = false;
+  /// Velocity mode: how far the integrated reference may run ahead of the arm.
+  double max_joint_lead_rad_ = 0.2;
+  /// Velocity mode: the joint speeds to command, and the position reference they
+  /// were integrated into. Both belong to the timer, because in this mode the
+  /// timer is what follows - there is no solver thread in the path at all.
+  FollowMode follow_mode_ = FollowMode::kVelocity;
+  JointVelocityLimits velocity_limits_;
+  std::unique_ptr<JointVelocityProfile> velocity_profile_;
+  Eigen::VectorXd velocity_position_;
+  bool have_velocity_position_ = false;
+  /// The generation the timer's own following state belongs to, so a new session
+  /// re-anchors the mapper and re-seeds the integration.
+  uint64_t tick_generation_ = 0;
   bool have_solution_ = false;
+  /// Whether the current Cartesian target still has to be solved for. One
+  /// attempt per target: a target the solver refused is not retried until the
+  /// operator moves it, which is what keeps an unreachable pose from being
+  /// handed to the solver on every control tick.
+  bool solve_pending_ = false;
   /// The pose the increment is added to when `reference_pose` is `commanded`.
   CartesianTarget reference_pose_;
   bool have_reference_pose_ = false;
@@ -1147,13 +1480,12 @@ private:
 
   msg::VrControllerFrame latest_frame_;
   std::atomic<bool> latest_frame_valid_{false};
-  std::atomic<std::size_t> frame_sequence_{0};
-  /// Solver thread only: the last frame it solved for.
-  std::size_t processed_sequence_ = 0;
   std::atomic<double> last_frame_time_{0.0};
   double last_tick_ = steadySeconds();
 
   bool saw_grip_ = false;
+  /// How far below the press threshold a release has to fall. See triggerPressed.
+  double trigger_hysteresis_ = 0.1;
   bool trigger_raw_ = false;
   bool trigger_stable_ = false;
   double trigger_changed_at_ = 0.0;

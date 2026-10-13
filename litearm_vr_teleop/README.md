@@ -50,8 +50,12 @@ which is zero, which freezes the reference. Nothing reports an error.
 `VrForwardController` therefore derives from
 `forward_command_controller::ForwardControllersBase` - it is a forward controller,
 setpoint stream in, hardware interfaces out, no trajectory and no goal - and
-overrides `update()` to write both interfaces, deriving each joint's velocity
-from the setpoint stream itself and bounding it by `max_velocity`.
+overrides `update()` to write both interfaces. The command carries the position
+of every joint, and optionally the velocity to carry it: this stack's own node
+publishes fourteen values (seven positions, then seven velocities), and a
+publisher that sends seven alone gets its velocity derived from the stream, so the
+topic keeps the shape a plain forward publisher naturally has. `max_velocity`
+bounds whichever of the two arrives.
 
 Two further things are overridden, both documented at the point of the override:
 
@@ -81,105 +85,137 @@ and everything that cannot is Python.
 
 ### How the controller's rotation reaches the tool
 
-Two frames are available, chosen by `rotation_mode` in `config/vr_teleop.yaml`,
-and the difference is what an operator sees when they turn their hand:
+Two control logics are available, chosen by `control_frame` in
+`config/vr_teleop.yaml`, and the difference is what an operator sees when they
+turn their hand:
 
-- **`world` (default)** — the tool turns about the same world axis the controller
+- **`base_link` (default)** - the increment is carried into the robot base frame
+  and applied there, so the tool turns about the same world axis the controller
   turned about, by the same angle. If the operator rolls the controller, the tool
   rolls with it; if they swing its nose, the tool's nose swings the same way in
-  the room. This is independent of the arm's pose and of how the controller is
-  held.
-- **`tool`** — the tool copies the controller axis for axis in its own frame. This
-  is only the same motion while the tool's frame and the controller's frame stand
-  in one particular relation to each other.
+  the room. Independent of the arm's pose and of how the controller is held.
+- **`tool`** - the increment is read in the controller's own frame and applied in
+  the tool's own frame, so the tool copies the hand axis for axis. That is the
+  same motion only while the tool's frame and the controller's frame stand in one
+  particular relation to each other - the one its calibration was measured at.
 
-`world` is the default because that relation is a property of the arm's pose, not
-of the rig. The reference's per axis signs were measured with the wrist rolled so
-that the tool's own Y axis pointed straight down; at any other wrist roll the tool
-frame is rolled with respect to the world by the difference, and the tool mode
+`base_link` is the default because that relation is a property of the arm's pose,
+not of the rig. The tool logic's signs were measured with the wrist rolled so that
+the tool's own Y axis pointed straight down; at any other wrist roll the tool
+frame is rolled with respect to the world by the difference, and the tool logic
 answers a hand rotation with a motion rotated by exactly that much. At the
 teleoperation start pose the wrist roll is about 95 degrees away from the pose
 those signs were measured at, which is a rotation the operator feels immediately.
-Both modes agree exactly at the measured pose, so `world` reproduces the measured
-motion where it was measured and keeps it everywhere else.
+Both logics agree exactly at the measured pose, so `base_link` reproduces the
+measured motion where it was measured and keeps it everywhere else.
 
-The frame correspondence (the headset's reference frame is gravity aligned but
-yawed with respect to the robot) stays a measured constant; it is per
-installation, because it depends on which way the operator stands. The two
-parameters above it are live, because the person who can tell whether a sign is
-right is the one holding the controller:
+Each logic carries **its own calibration**, because the two read the same three
+numbers in different frames and a mirror that is right in one is wrong in the
+other:
+
+| parameter | logic | the frame the three numbers are read in |
+| --- | --- | --- |
+| `base_link_rotation_signs` | `base_link` | the robot base axes (x right, y forward, z up) |
+| `tool_rotation_signs` | `tool` | the tool's own axes |
+
+They are this rig's measurements, and the parameter file says what was seen when
+they were set. The frame correspondence underneath them (the headset's reference
+frame is gravity aligned but yawed with respect to the robot) is a measured
+constant as well; it is per installation, because it depends on which way the
+operator stands. All three keys are live, because the person who can tell whether
+a direction is right is the one holding the controller:
 
 ```bash
-ros2 param set /vr_teleop rotation_signs "[1.0, 1.0, -1.0]"
-ros2 param set /vr_teleop rotation_mode tool
+ros2 param set /vr_teleop control_frame tool
+ros2 param set /vr_teleop base_link_rotation_signs "[-1.0, -1.0, 1.0]"
 ```
 
-`rotation_signs` is `[1, 1, 1]` by default, which means "leave this mode as
-measured": it is a correction applied on top of the mode's own baseline - nothing
-for `world`, the reference's measured `[1, -1, -1]` for `tool`. That is what makes
-switching modes live give the other *measured* behaviour rather than a tool frame
-mode with its signs left out. A correction applies per axis in the frame the mode
-reads in - robot axes for `world`, tool axes for `tool` - and exists for the cases
-geometry cannot fix: a mirrored headset frame, or a controller held upside down
-out of habit. A change takes effect on the next headset frame, and the arm holds
-its pose until then.
+A change takes effect on the next headset frame, and the arm holds its pose until
+then. The startup log prints which logic is running and both calibrations, so a
+session can be asked rather than remembered.
+
+**Which logic is which, when they look the same.** At the attitude the tool
+calibration was measured at they *are* the same, and so is any motion whose axis
+happens to line up with the tool's own axes. Away from that attitude they differ:
+turning the controller about the world vertical sweeps the tool's pointing
+direction under `base_link`, and mostly rolls the tool about its own long axis
+under `tool`.
 
 ### Jitter, and where the command stream's numbers come from
 
 Three things decide whether the command stream is smooth, and they are separate
 on purpose.
 
-**The inverse kinematics is solved once per headset frame, not once per control
-cycle.** The Cartesian target only changes when a frame arrives, but the solver
-used to be re-run every cycle against it, seeded from the measured joints. A
-solver that is not deterministic - and the SNS plugin is not, its search restarts
-inside the 7 axis null space - then returned a slightly different answer each
-time, a joint space wobble of a few hundredths of a radian per cycle. On this rig
-that showed up exactly as the symptom it looks like: commanded positions that
-move while the operator's hand does not. Between frames the last solution is
-republished instead, which also matters for a second reason - the firmware wants
-a continuous stream, not a new target - and the joint filter keeps easing toward
-it, which turns one frame's step into a short ramp rather than a step. Measured
-on the mock hardware with the hand held still: 0.00000 rad of commanded movement
-per sample, against 0.049 rad in one cycle before, and with 0.3 mm of simulated
-tracking noise the implied velocity request peaks at 0.14 rad/s against the
-controller's 1.0 ceiling.
+**The target advances on the control tick, and the inverse kinematics is solved
+once per target, not once per control cycle.** Frames arrive when the link allows,
+about 72 Hz with jitter and fewer when the WiFi is busy, and a target stepped by
+each arrival would be stepped by however long that arrival took. The node
+therefore ticks at `control_rate_hz` and feeds the newest frame to the mapper on
+each tick, so every step is one control period long and the headset's rate
+decides only how fresh the pose in that step is. The solver is asked again only
+when the target has actually changed: a solver that is not deterministic - and
+the SNS plugin is not, its search restarts inside the 7 axis null space - returns
+a slightly different answer for an unchanged target every time it is asked, a
+joint space wobble of a few hundredths of a radian. On this rig that showed up
+exactly as the symptom it looks like: commanded positions that move while the
+operator's hand does not. Between solves the last solution is republished
+instead, which also matters for a second reason - the firmware wants a continuous
+stream, not a new target - and the joint filter keeps easing toward it, which
+turns one step into a short ramp rather than a step. Measured on the mock hardware
+with the hand held still: 0.00000 rad of commanded movement per sample, against
+0.049 rad in one cycle before, and with 0.3 mm of simulated tracking noise the
+implied velocity request peaks at 0.14 rad/s against the controller's 1.0
+ceiling.
 
 **The solver is seeded from the previous solution**, so the same target and the
 same seed give the same answer and the redundant axis stays where the last
 solution put it instead of wandering through the null space.
 
-**The velocity the controller writes is the step over the interval between
-command arrivals, not over the control cycle.** The firmware reads that field as
-the slew ceiling of the position reference, so the honest value is the step
-divided by the time the operator took to make it. This loop runs at 100 Hz and
-the teleoperation node does not - it solves inverse kinematics per command - so
-dividing by the cycle time multiplied every request by the ratio: at 23 Hz a
-0.02 rad step became 2.0 rad/s instead of 0.46, which the 1.0 ceiling clipped, so
-every step asked for full speed. That is the mechanism behind a velocity plot
-that sits pinned at its limit.
+**The velocity written beside the position is the node's own, not a derivation.**
+The firmware reads that field as the slew ceiling of the position reference, so
+the honest value is the speed the command stream is actually asking for, which is
+the rate limiter's own state - the node runs it and publishes it, and the
+controller writes it verbatim. This matters because the alternative is a
+differentiation of an already profiled stream, and what a differentiation carries
+is the interval between two commands' arrivals: a number the CONTROLLER measures
+on its own clock, which is not the node's clock and jitters by whatever the
+transport and scheduler did. A ceiling that jitters is a reference that moves at
+a jittering speed. The derivation is still there, and still used by a publisher
+that sends positions alone; it is no longer the path this stack takes. Its own
+history is why: with the solve on the control path the node ran at about 23 Hz
+while the controller ran at 100, so dividing a step by the control period
+multiplied every request by the ratio - a 0.02 rad step asked for 2.0 rad/s
+instead of 0.46, which the 1.0 ceiling then clipped, and every step asked for full
+speed. That is the mechanism behind a velocity plot that sits pinned at its limit.
 
 `target_deadband_m` and `target_deadband_rad` (both 0 by default) keep target
 changes below a threshold out of the solver entirely. Read the cost before
-raising them: an increment below the deadband is dropped rather than accumulated,
-because the target is re-based on the measured pose every frame, so a deadband of
-0.5 mm at 72 Hz acts as a velocity threshold of 3.6 cm/s. Zero means the solver
-sees every change.
+raising them: with the reference on the measured pose an increment below the
+deadband is dropped rather than accumulated, because the target is re-based on
+the measured pose every tick, so a deadband of 0.5 mm at the 100 Hz tick acts as
+a velocity threshold of 5 cm/s. With the reference on the commanded pose the
+increments do accumulate and a deadband is safe. Zero means the solver sees every
+change.
 
 ### The velocity is a curve, not a step and a zero
 
 Two things decide what the firmware sees in the velocity field, and both of them
 had to be fixed before the field was worth plotting.
 
-The controller runs at 100 Hz and the command stream does not: the node solves
-inverse kinematics per command, so most control cycles have no arrival in them.
-The velocity was recomputed every cycle, from the step of a setpoint that had not
-changed since the last one - which is zero. The field therefore went to zero
-between arrivals and back to the honest value on the next one. The firmware
-advances the position reference at the ceiling it is given, so a ceiling of zero
-half the time is an arm that moves half as far as it was told to, and a velocity
-plot of a session shows a band of spikes. The velocity is now worked out on the
-cycle a setpoint arrives and held until the next one.
+The field used to be derived from the setpoint stream on the cycle a setpoint
+arrived and held until the next one - and before that, recomputed every cycle
+from a setpoint that had not changed since the last one, which is zero. A field
+that is zero half the time is a slew ceiling of zero half the time, and the
+firmware advances the reference at the ceiling it is given, so that is an arm
+that moves half as far as it was told to: a velocity plot of a session shows a
+band of spikes rather than a curve.
+
+The node now publishes the velocity it is asking for, beside the position, and
+the controller writes it as given. There is nothing left to derive: the figure is
+the rate limiter's own state, the speed of the stream the node just produced, and
+the two do not have to agree because they are the same number. A publisher that
+sends positions alone still gets the derived figure, with the arrival interval as
+its denominator, as before: the interface keeps working either way.
 
 The node then gives that stream an actual motion profile: `max_joint_acceleration`
 (20 rad/s^2 by default) bounds how fast the speed may change and `max_joint_jerk`
@@ -192,12 +228,55 @@ rate with no permanent offset. Tune `max_joint_acceleration` first: it is the
 number the operator feels. A lower `max_joint_jerk` is not "smoother" - it also
 delays the deceleration, which makes the arm overshoot instead of approaching.
 
+### Following in the velocity form, and the mode that chose it
+
+`follow_mode` selects the control law, and `velocity` is the default. It is
+MoveIt Servo's arrangement, in this arm's terms: the hand's twist comes from the
+frames, the damped Jacobian turns it into a joint speed, `JointVelocityProfile`
+smooths that speed and bounds it, and the position written beside it is the speed
+integrated against this node's clock. `position` is the previous behaviour - an
+absolute target, solved by the configured plugin on its own thread - and is kept
+because it is what was measured on hardware and because it can be compared on the
+same rig without a rebuild.
+
+What each one is better at, measured on the fake firmware against a recorded
+teleoperation episode (`tools/headset_replay.py`, one pass of a 9 s episode):
+
+| | velocity | position |
+| --- | --- | --- |
+| command stream ripple | 0.36 to 0.88 rad | 0.0002 to 1.11 rad |
+| peak commanded speed | 1.92 rad/s, at its 2.0 ceiling for 1.8 percent of samples | 0.50 rad/s, never at the ceiling |
+| per-sample flip, peak at the publish rate | absent | absent |
+
+The two differ in what they do when the arm cannot keep up, not in smoothness:
+the velocity form delivers the operator's motion and scales the command down as
+the reference runs ahead (`max_joint_lead_rad`), while the position form stops
+carrying motion beyond its Cartesian lead cap (`max_target_lead_m`). On the rig
+that produced the original complaint - "I have to move my hand a long way before
+the arm does anything" - that difference is the point of the mode.
+
+Two things about it are worth knowing before reading the numbers:
+
+**The solve is no longer in the path.** There is nothing for the plugin to be
+slow at, so the target is as fresh as the tick rather than as fresh as the
+solver, and its non-determinism - the reason the position mode caches a solution
+per target - is not there to work around. The solver thread stays alive but idle
+in this mode.
+
+**What reaches the firmware is the loop's own speed.** The controller writes the
+velocity field verbatim, so the slew ceiling of the position reference is a
+number this cycle computed rather than a difference of two positions
+reconstructed downstream. That is the same statement as the section above, made
+structural.
+
 ### Where the solve runs, and what the stream is made of
 
 Inverse kinematics runs on its own thread and hands its latest solution to the
 publishing timer through a single slot. The timer produces the command stream at
 its configured rate from whatever is in that slot, and the joint filter and rate
-limiter interpolate between solutions. This is what makes the stream independent
+limiter interpolate between solutions. That thread also ticks the target at the
+same rate - `ControlTick` - and each tick feeds the newest headset frame to the
+mapper, so the target advances on this node's clock rather than on the link's. This is what makes the stream independent
 of the solver: with the plugin backend on the reference machine a solve takes
 tens of milliseconds, and while it ran on the control path the command stream
 inherited that period. On mock hardware, where the state mirrors the command,
@@ -264,75 +343,107 @@ measuring on the hardware, not before, because it trades "the arm falls behind
 and forgets" for "the arm catches up", and only the real arm can say which is
 worse.
 
-### The control loop does not run at its configured rate
+### Which clock runs what
 
-`control_rate_hz` is 100, and on this machine the node achieves about **23 Hz**
-while following, because each cycle does forward kinematics, an inverse
-kinematics solve and the filter, and the SNS plugin does not fit in 10 ms. The
-rate is measured from the command stream (the node publishes once per cycle), so
-it can be checked with a `ros2 topic hz /vr_forward_controller/commands` while
-the grip is held.
+Three clocks meet in this stack, and only one of them is asked to be anything
+like the others.
 
-Everything scaled by `dt` is therefore scaled by the wrong number: the joint
-filter's `alpha = dt/(dt + low_pass_tau)` becomes 0.68 instead of 0.33 (so it
-passes two thirds of every step immediately), and the per cycle step limit
-becomes 0.086 rad instead of 0.02. Two consequences worth knowing: the smoothing
-is weaker than the constants suggest, and headset frames arrive faster than they
-are consumed (72 against 23), so the averaging window covers about 0.4 s of wall
-time instead of 0.14 s, which is part of the tracking shortfall above.
+| Clock | Rate | What it decides |
+| --- | --- | --- |
+| the headset | ~72 Hz, jittery | which pose the node has to work with. Nothing is aligned to it, deliberately: the node's job is to keep its timing out of the command stream. |
+| `vr_teleop`'s tick, and the command stream | `control_rate_hz`, 100 Hz | when the target advances, when the solver is asked, and when a command is published. |
+| the controller, and the firmware's state report | `update_rate`, 100 Hz | when the hardware is written and read. Set equal to the report rate: a faster loop than the report reads the same feedback frame again, which is the stair-stepped `/joint_states` the arm's own configuration documents. |
+| the firmware's control loop | 300 Hz | how the reference is slewed to the command and how the motors are driven. 3 to 1 against the controller, which is fine: the firmware interpolates every tick, and it is the loop the gains belong to. |
 
-The honest fixes, in the order this was written: move the solve out of the
-control loop (or run a cheaper backend), or lower `control_rate_hz` to what the
-node can actually do and re-tune the `dt` scaled values against that number. What
-is not a fix is leaving the configuration claiming 100 Hz while the coefficients
-are computed from 43 ms.
+Two consequences worth stating, because they are the ones people get wrong:
 
-## Two launches
+**Do not raise the controller rate to match the firmware's 300 Hz.** It would
+read the same 100 Hz feedback frame three times and write commands nobody
+measured. If a faster control loop is ever wanted, the state report rate has to
+come up with it - the firmware's `RPT_STATUS_MS` - and that is a change to the
+arm, not to this package.
+
+**Closed-loop bandwidth stays well inside the loop it is closed in.** The
+firmware's 300 Hz is the loop; a gain that puts the wrist's closed-loop bandwidth
+near 160 Hz on a 250 Hz command loop was measured on this arm as ringing, and the
+wrist gains are deliberately left low for it. Precision comes from the model and
+the feed forward, not from stiffness.
+
+### The target advances as fast as the solve, not as fast as the tick
+
+The command stream runs at `control_rate_hz`, because the tick that publishes it
+does no more than read the solve slot, filter and limit. Measured on the mock
+stack with the SNS plugin: a 100 Hz stream, mean step 0.00055 rad, and no sample
+sitting at the velocity ceiling.
+
+The rate at which the TARGET advances is a different number, and it is bounded by
+the solve: the tick that feeds the mapper and asks for inverse kinematics runs on
+the same thread, so a backend that takes 70 ms per solve advances the target
+about 14 times a second whatever the tick rate says. That is not a defect to
+tune away, it is the solver's cost showing up as latency instead of as a quantized
+stream - which is what it used to be, when the solve ran on the publishing path
+and a 70 ms solve turned the position plot into a staircase of 70 ms steps. On
+the damped least squares backend, which solves in this process, the target
+advances at the tick rate.
+
+Nothing is lost at either rate: the mapper measures the hand's motion since the
+last time it was fed, so a target advanced less often carries all of the motion in
+between, and in `commanded` reference mode the arm delivers it as soon as it can.
+
+## Three launches
+
+One entry point per bench, and one switch: `dry_run` says whether this run drives
+hardware or simulates it.
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock hardware
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # fake firmware, real protocol
+ros2 launch litearm_vr_teleop teleop_arm.launch.py            # the arm
+ros2 launch litearm_vr_teleop teleop_gripper.launch.py        # the gripper, arm simulated
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py    # both
+
+# the hardware drivers instead of simulation, for whichever one is running
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py dry_run:=false
 ```
 
-Both start the same controllers and the same nodes. The difference is the last
-centimetre, and it decides what the run can tell you.
+| launch | controls | what `dry_run:=false` drives |
+| --- | --- | --- |
+| `teleop_arm` | the arm; the gripper's component stays simulated | the arm's direct-USB component, motors enabled at configure |
+| `teleop_gripper` | the gripper; the arm stays simulated | the gripper's component, with its motor gate opened |
+| `teleop_arm_gripper` | both | both |
 
-**virtual** replaces the hardware with `mock_components/GenericSystem`: no
-firmware, no daemon, no shared memory, no protocol, and the mock arm is at the
-commanded pose immediately. Use it to watch the whole path run cheaply, and to
-check *arithmetic*: axis directions, the return to the start pose, the gripper,
-what a release does. Measured on this machine: the return to the start pose lands
-within 0.0003 rad, and a 12 cm controller move produces a 12.5 cm end effector
-move (the extra 4 percent is the designed smoothing tail).
+`dry_run` is the only mode argument, and it defaults to true, so a launch file run
+by accident moves nothing. A launch that does not control a device still simulates
+it, and that is not tidiness: a component left real with nothing commanding it is a
+motor being held, and the arm launch has no business opening the gripper's gate.
+The gripper launch simulates the arm for the opposite reason - the teleoperation
+node needs a joint state to hold and to plan from, and with no arm on the bench the
+simulated one is what provides it.
 
-**sim** runs the real firmware daemon in dry run mode: the real protocol, the real
-framing, the real state reporting rate, and a fake firmware on a pty instead of
-an arm. Nothing is attached to a serial port and `can0` is never opened. Use it to
-check *behaviour that only exists with the real path*: that the firmware accepts
-the command stream, that a continuous stream is produced at all (it has a 100 ms
-watchdog), and that both command interfaces are written. It is the run that
-distinguishes this controller from one that writes position only, because the
-fake firmware freezes the reference on a zero velocity exactly as the real one
+`use_rviz` and `headset_port` are the only other arguments. Everything a number
+can tune lives in `config/vr_teleop.yaml`; the TCP offset used to be its own file
+and is now one of them.
+
+The description is one robot either way, so what decides the hardware inside it is
+still the xacro arguments `use_mock_hardware` and `litegrip_dry_run` /
+`litegrip_hardware_enable`. The launches set those from `dry_run`; nothing else
 does.
 
-Its own documentation warns against reading dynamics from it, and that warning is
-real: the fake firmware is a first order kinematic model, so a following error or
-a tracking ratio measured there means nothing. On this machine the sim run does
-confirm that the arm moves and in the right direction, and shows the end effector
-delivering about a quarter of the controller's motion - which is what a lagging
-plant does to a velocity form mapping that re-bases its target on the measured
-pose each frame, not a property of the command path.
+Three lines from the log are worth knowing, because each one is the difference
+between a run that works and a run that only looks like it does:
 
-Neither launch can reach real hardware. The dry run flag is hardcoded rather than
-exposed as an argument, and the shared memory segment is named separately from
-the arm stack's (`/litearm_vr_hw` rather than `/litearm_hw`) so this stack cannot
-attach to a segment belonging to a running arm stack. A real hardware launch is
-one copy of `teleop_sim.launch.xml` with `dry-run` removed from the daemon
-arguments and the shared memory name changed back - and, before it is used, the
-four items in "Before real hardware" below.
+```text
+description meshes: all packages resolve (litearm_description x18, litegrip_description x6)
+control logic 'base_link': signs [-1.00 -1.00 1.00] (base_link [...], tool [...])
+[LitegripSystem] gripper hardware interface initialized: joint=gripper_opening_joint
+    channel=can0 dry_run=false hardware_enable=true, calibration ...
+```
 
-There is deliberately no `move_group`. Planning is inside `vr_teleop_node`, so a
-planner node here would be a second, unused planning entry.
+The first says the arm will be drawn rather than silently missing in rviz. The
+second says which control logic and which calibrations the node is running with.
+The third is the gripper's own account of itself: `dry_run=true` there means a real
+gripper is not being driven whatever the launch file looked like, and
+`hardware_enable` is a *different* gate from the velocity bound the component needs
+before it will send any motion frame at all - a component that is enabled, holding
+torque and refusing every motion frame is what a missing bound looks like.
 
 ## Configuration
 
@@ -367,8 +478,11 @@ cd <colcon workspace>
 colcon build --symlink-install
 source install/setup.bash
 
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py
 ```
+
+That moves nothing: it is the simulated bench. Add `dry_run:=false` for the
+hardware, once the checklist below has been walked.
 
 The headset connects to `ws://<this machine>:8765`. The port can be moved with
 `headset_port:=`. Note that `vr_control`'s `ws_echo_server.py` also defaults to

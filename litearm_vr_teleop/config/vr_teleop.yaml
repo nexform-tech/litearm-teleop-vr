@@ -24,10 +24,17 @@ vr_teleop:
     joint_state_topic: /joint_states
     command_topic: /vr_forward_controller/commands
 
-    # The control loop runs at this rate regardless of the headset's rate. Between
-    # two headset frames it keeps solving against the same absolute target, which
-    # is idempotent, so a rate above the headset's is not wasted work and a rate
-    # below it does not lose motion.
+    # The control loop runs at this rate regardless of the headset's rate. It
+    # paces two things, and both are deliberate: the command stream published to
+    # the controller, and the tick on which the hand's motion is folded into the
+    # Cartesian target. Between two headset frames the target keeps being advanced
+    # by the increment the frames so far describe, which is idempotent in the
+    # sense that matters here - the target is an absolute pose derived from the
+    # operator's displacement, so re-solving cannot accumulate motion - so a rate
+    # above the headset's is not wasted work and a rate below it does not lose
+    # motion. Ticking the target here rather than on each arrival is what keeps
+    # the link's timing out of the stream: a step sized by an arrival is sized by
+    # however long that arrival took.
     control_rate_hz: 100.0
 
     joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
@@ -44,13 +51,18 @@ vr_teleop:
 
     # Which inverse kinematics backend. Both are implemented and either can be
     # selected at any time; see the class documentation in teleop_planner.hpp.
+    #   dls     damped least squares implemented in this package, on top of the
+    #           MoveIt core's forward kinematics and Jacobian. Predictable latency,
+    #           in process, and deterministic - which is what a following task
+    #           wants, and why it is the default. It is also the solver the
+    #           velocity form uses whatever this says, since that path has no
+    #           plugin in it at all.
     #   plugin  the solver named below, loaded through pluginlib. Reuses the
     #           MoveIt configuration, at the cost of a latency this node does not
-    #           control (the configuration budgets 0.2 s per call).
-    #   dls     damped least squares implemented in this package, on top of the
-    #           MoveIt core's forward kinematics and Jacobian. Predictable
-    #           latency, which is what a following task wants.
-    ik_backend: plugin
+    #           control (the configuration budgets 0.2 s per call). Kept because a
+    #           rig may want the solver it already tuned, and because the two can
+    #           be compared on the same arm.
+    ik_backend: dls
 
     # 当雅可比的最小奇异值低于这个数时，改用本包的阻尼最小二乘后端求解（0 = 关闭）。
     #
@@ -88,7 +100,55 @@ vr_teleop:
     max_step_rad: 0.08
     max_joint_velocity: 2.0
     low_pass_tau: 0.02
-    moving_average_frames: 10
+    # Samples in the moving average of the hand's increment. One sample is one
+    # control tick, so this is 100 ms of smoothing at the control rate below and
+    # it does not stretch when the headset slows down - which it used to, since
+    # the samples were headset frames: ten of them were 139 ms at the measured
+    # 72 Hz and 278 ms on a link that had dropped to 36 Hz. Set 14 for the
+    # measured 139 ms.
+    moving_average_samples: 10
+
+    # Which control law follows the hand.
+    #
+    #   velocity  the hand's twist goes through the damped Jacobian, then a low
+    #             pass, then an acceleration and speed ceiling, and the position
+    #             written beside the velocity is that speed integrated at the
+    #             control rate. MoveIt Servo's arrangement, and the default: on
+    #             this arm the velocity field is what the firmware reads as the
+    #             slew ceiling of its position reference, so the loop hands it a
+    #             number it computed this cycle instead of a difference of two
+    #             positions for the controller to reconstruct. Nothing in this
+    #             path goes through a kinematics plugin, so the target is as fresh
+    #             as the tick rather than as fresh as the solver.
+    #
+    #   position  the previous behaviour: an absolute Cartesian target, solved by
+    #             the configured plugin on its own thread, with the joint filter
+    #             easing towards the answer. Targets the arm cannot reach are
+    #             refused and held rather than integrated, and `reference_pose`
+    #             decides whether a target that was not delivered is carried.
+    #
+    # Both are supported and either can be selected at any time; they can be
+    # compared on the same rig without a rebuild, which is the only honest way to
+    # choose between them.
+    follow_mode: velocity
+
+    # Velocity mode: time constant of the low pass on the commanded joint speed,
+    # seconds. Servo carries the same filter as `low_pass_filter_coeff`, a per
+    # iteration coefficient; a time constant is used here because this loop
+    # measures its interval, and a coefficient would mean a different cutoff every
+    # time a tick ran late. Zero turns the smoothing off and leaves the
+    # acceleration ceiling below to shape the command on its own.
+    velocity_filter_tau: 0.03
+
+    # Velocity mode: how far the integrated reference may run ahead of the arm,
+    # radians per joint. The joint space counterpart of max_target_lead_m below,
+    # and it is needed for the same reason plus one: the velocity form integrates,
+    # so an arm that lags leaves the reference further ahead every cycle, and an
+    # operator who keeps pushing while the arm cannot follow would wind it out to
+    # a joint limit. The command is scaled down - whole, not joint by joint, so
+    # the direction survives - as the worst joint approaches this. Zero or less
+    # disables the guard.
+    max_joint_lead_rad: 0.2
 
     # The motion profile of the command stream: how fast a joint may move, how
     # fast that speed may change, and how fast the change of speed may change.
@@ -151,52 +211,76 @@ vr_teleop:
     #
     # Read the cost before raising them in the `measured` mode: an increment
     # below the deadband is not accumulated, it is dropped, so the deadband acts
-    # as a velocity threshold of deadband / frame period (0.5 mm at 72 Hz is
-    # 3.6 cm/s). That is why both default to zero. With `reference_pose:
+    # as a velocity threshold of deadband / tick period (0.5 mm at the 100 Hz
+    # tick is 5 cm/s). That is why both default to zero. With `reference_pose:
     # commanded` the increments do accumulate and a deadband of a few tenths of
     # a millimetre is safe and useful.
     target_deadband_m: 0.0
     target_deadband_rad: 0.0
 
-    # How the controller's rotation reaches the tool.
+    # Which control logic the hand's motion is read in. Two of them, and this key
+    # is the only thing that changes between them; each carries its own rotation
+    # calibration below, because the two read the same three numbers in different
+    # frames and a mirror that is right in one is wrong in the other.
     #
-    #   world  the tool turns about the same world axis the controller turned
-    #          about, by the same angle. This is what "the gripper follows my
-    #          hand" means to an operator, and it holds at every arm pose.
-    #   tool   the tool copies the hand axis for axis, in the tool's own frame.
-    #          This is the previous behaviour. It is the same motion as `world`
-    #          only while the tool's frame and the controller's frame stand in
-    #          one particular relation - which the measured baseline below was
-    #          taken at, and which any other wrist roll breaks. At the start
-    #          pose, whose wrist roll is about 95 degrees from that one, an
-    #          operator turning the controller saw the arm answer in a rotated
-    #          direction.
+    #   base_link  the controller's rotation increment is carried into the robot
+    #              base frame and applied there, so the tool turns about the same
+    #              world axis the controller turned about, by the same angle,
+    #              whatever pose the arm is in and however the controller is held.
+    #              This is the default, and the one this rig is calibrated for.
+    #   tool       the increment is read in the controller's own frame and applied
+    #              in the tool's own frame, so the tool copies the hand axis for
+    #              axis. That is the same motion only while the tool's frame and
+    #              the controller's frame stand in one particular relation - the
+    #              pose the tool calibration below was measured at - and any other
+    #              wrist roll hands the operator a response rotated by the
+    #              difference.
     #
-    # `world` needs no calibration and is the default. `tool` is kept because a
-    # rig that was calibrated for it can ask for it back.
-    rotation_mode: world
+    # Live, like the calibrations: the person who can tell whether a direction is
+    # right is the one holding the controller, so either can be changed while the
+    # node runs and the change takes effect on the next headset frame (until then
+    # the arm holds the pose it had):
+    #
+    #   ros2 param set /vr_teleop control_frame tool
+    #   ros2 param set /vr_teleop base_link_rotation_signs "[-1.0, -1.0, 1.0]"
+    control_frame: base_link
 
-    # Per axis sign on the rotation increment, applied on top of the mode's own
-    # baseline: nothing in `world` (the geometry is already right), the measured
-    # [1, -1, -1] in `tool`. All ones therefore means "leave this mode as
-    # measured", which is what makes switching modes live give the other
-    # measured behaviour rather than a mode with a sign missing.
+    # Per axis sign applied to the rotation vector, in the frame the selected
+    # control logic reads in: robot base axes for base_link, tool axes for tool.
     #
-    # The signs are applied in the frame the mode reads in: robot base axes for
-    # `world`, tool axes for `tool`. They exist for what geometry cannot fix: a
-    # headset frame that is mirrored, or a controller habitually held upside
-    # down.
+    # Each is that logic's own calibration and nothing else - the mapping carries
+    # the hand's motion, these say which way each of its three directions points on
+    # this rig - so they are independent by construction rather than by convention.
     #
-    # Both parameters are live. The person who can tell whether a sign is right
-    # is the one holding the controller, so they can be changed without
-    # restarting anything, and the change takes effect on the next frame:
+    # base_link, measured here: raising the controller tilted the tool down and
+    # lowering it tilted the tool up, and leaning the controller left and right
+    # tilted it the other way as well, so the rotations about the robot's x (the
+    # operator's left-right axis) and y (their forward axis) are mirrored. The two
+    # that are mirrored and the one that is not are worth naming: diag(-1,-1,1) is
+    # a half turn about z, not a mirror, which is what an operator standing on the
+    # far side of the arm from where the baseline was measured sees. So the
+    # TRANSLATION has to be checked too, because the same correspondence carries it
+    # (singleArmUprightMapping in teleop_math.cpp): if pushing the controller
+    # forward moves the tool backward, the correspondence is the thing to fix and
+    # these two signs must come back to 1.0 - correcting both corrects twice.
     #
-    #   ros2 param set /vr_teleop rotation_signs "[1.0, 1.0, -1.0]"
-    #   ros2 param set /vr_teleop rotation_mode tool
+    # tool, the reference implementation's measured baseline: the controller's
+    # axes read as the tool's, which is the previous behaviour this key restores.
+    base_link_rotation_signs: [-1.0, -1.0, 1.0]
+    tool_rotation_signs: [1.0, -1.0, -1.0]
+
+    # The point of the tool the operator commands, as an offset from the planning
+    # tip link (tip_link, ee_link) in the tip frame, in metres. The headset commands
+    # a tool centre point, not the flange; 0.18 m is this gripper's
+    # flange-to-grasp-point distance, and 0.0 teleoperates the flange itself.
     #
-    # A change takes effect on the next headset frame; until then the arm holds
-    # the pose it had.
-    rotation_signs: [1.0, 1.0, 1.0]
+    # It is applied on both sides of the increment mapping, which is what makes it a
+    # frame rather than a fudge factor: the measured tip pose is moved to the TCP
+    # before the hand's increment is applied, so the anchor is the TCP the operator
+    # sees, and the resulting target is moved back to the tip pose before the
+    # inverse kinematics, because that is the frame the solver plans for. Changing
+    # it changes which point of the tool follows the hand, not the gain.
+    tcp_offset: [0.0, 0.0, 0.18]
 
     # Freeze when the headset goes quiet. Deliberately much shorter than the
     # controller's own staleness timeout: this node knows more than the controller
@@ -214,6 +298,12 @@ vr_teleop:
     gripper_open_position: 0.07479
     gripper_close_position: 0.0
     gripper_max_effort: 3.5
+
+    # How far the trigger has to fall below the threshold before that counts as a
+    # release. One threshold on an analogue input that rests near it oscillates: on
+    # this rig a trigger nobody was touching produced an open/close pair every half
+    # second. Zero restores the bare threshold.
+    trigger_hysteresis: 0.1
 
     # Trigger analogue threshold, debounce, and a floor on how long a close lasts.
     # Operators release the trigger while the fingers are still travelling; without

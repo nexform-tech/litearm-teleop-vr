@@ -95,6 +95,35 @@ public:
     const Eigen::VectorXd * target, const Eigen::VectorXd & measured, double command_age,
     bool new_command, double dt, Eigen::VectorXd & positions, Eigen::VectorXd & velocities);
 
+  /// The same, for a sender that states the velocity instead of leaving it to be
+  /// derived from the stream.
+  ///
+  /// `velocity_target` is the speed the sender is asking for, one per joint in
+  /// the same order as `target`. A null one means "derive it", which is what the
+  /// overload above does and what a publisher that has only positions to give
+  /// needs.
+  ///
+  /// Stating it is better whenever the sender knows it, and the teleoperation
+  /// node does: it runs a rate limiter whose whole job is to work out the speed
+  /// of the command it publishes, and that speed is exactly what this field
+  /// means to the firmware - the ceiling the position reference is slewed at. A
+  /// derived value is a differentiation of an already profiled stream, and what
+  /// it carries that the stated one does not is the interval between arrivals: a
+  /// number the CONTROLLER measures on its own clock, which is not the sender's
+  /// clock and jitters by whatever the transport and the scheduler did. Put a
+  /// jittering number in the ceiling of a reference and the reference moves at a
+  /// jittering speed, which is the defect this overload removes rather than
+  /// moves.
+  ///
+  /// A velocity of the wrong length makes the whole command unusable and the
+  /// joints hold, because a velocity that does not belong to these joints is a
+  /// publisher bug, and the value it would put in the ceiling belongs to some
+  /// other robot.
+  bool update(
+    const Eigen::VectorXd * target, const Eigen::VectorXd * velocity_target,
+    const Eigen::VectorXd & measured, double command_age, bool new_command, double dt,
+    Eigen::VectorXd & positions, Eigen::VectorXd & velocities);
+
 private:
   ForwardCommandLimits limits_;
   Eigen::VectorXd positions_;

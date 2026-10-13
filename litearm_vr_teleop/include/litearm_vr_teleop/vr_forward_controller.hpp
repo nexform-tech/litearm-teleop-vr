@@ -47,6 +47,16 @@ namespace litearm_vr_teleop
 /// stream, so the topic keeps the shape its publisher naturally has: seven
 /// positions, one per joint, in joint order.
 ///
+/// The topic accepts both layouts and the message itself says which one it is,
+/// because the two publishers are not equally informed. This stack's own node
+/// runs the rate limiter before it publishes, so it knows the speed it is asking
+/// for and publishes fourteen values: seven positions, then the seven
+/// velocities to carry them. A publisher that has only positions to give still
+/// works, and the velocity is then derived from its stream as described above -
+/// with the one difference that the derived figure carries the interval between
+/// the controller's arrivals, measured on the controller's clock, which is not
+/// the sender's clock.
+///
 /// What is still inherited and worth naming: `rt_command_ptr_`, the lock free
 /// handover from the subscription to the control loop, and the joint list
 /// plumbing. What is overridden and why:
@@ -124,9 +134,16 @@ private:
   /// allocates.
   Eigen::VectorXd measured_;
   Eigen::VectorXd target_;
+  /// The velocity the publisher stated alongside the positions, in the second
+  /// half of a command that carries one. Unused when the command has only
+  /// positions in it.
+  Eigen::VectorXd target_velocity_;
   Eigen::VectorXd command_positions_;
   Eigen::VectorXd command_velocities_;
   bool has_target_ = false;
+  /// Whether this activation has already said that the ceiling is being derived
+  /// rather than stated. Logged once, not once per cycle.
+  bool noted_derived_velocity_ = false;
 };
 
 }  // namespace litearm_vr_teleop

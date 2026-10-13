@@ -71,7 +71,7 @@ Eigen::Matrix3d calibratedFlip()
 TeleopLimits testLimits()
 {
   TeleopLimits limits;
-  limits.moving_average_frames = 1;  // no smoothing, so increments are exact
+  limits.moving_average_samples = 1;  // no smoothing, so increments are exact
   return limits;
 }
 
@@ -81,7 +81,7 @@ TEST(TeleopMath, UprightMappingMatchesTheMeasuredBaseline)
 
   // The geometric mode, with no correction: it needs none, because the
   // increment it applies is measured and applied in the robot frame.
-  EXPECT_EQ(mapping.rotation_mode, RotationMapping::kWorld);
+  EXPECT_EQ(mapping.rotation_mode, RotationMapping::kBaseLink);
   EXPECT_TRUE(mapping.rotation_signs.isApprox(Eigen::Vector3d::Ones()));
 
   // Kept for the tool frame mode, which is the previous behaviour.
@@ -157,6 +157,9 @@ TEST(TeleopMath, WorldModeResponseDoesNotDependOnTheArmPose)
 
     AxisMapping tool_mapping = singleArmUprightMapping();
     tool_mapping.rotation_mode = RotationMapping::kTool;
+    // The tool logic's own calibration, which the configuration carries: the two
+    // logics read the same three numbers in different frames.
+    tool_mapping.rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
     TeleopIncrementMapper tool_mapper(tool_mapping, testLimits());
     tool_mapper.start(controller, Eigen::Quaterniond::Identity());
     const Eigen::Matrix3d tool_increment =
@@ -204,6 +207,7 @@ TEST(TeleopMath, BothModesAgreeAtTheAttitudeTheBaselineWasMeasuredAt)
 
   AxisMapping tool_mapping = singleArmUprightMapping();
   tool_mapping.rotation_mode = RotationMapping::kTool;
+  tool_mapping.rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
   TeleopIncrementMapper tool_mapper(tool_mapping, testLimits());
   tool_mapper.start(controller, controller_orientation);
   const CartesianTarget tool_target =
@@ -309,7 +313,7 @@ TEST(TeleopMath, PausedMapperCommandsNothingUntilRestarted)
 TEST(TeleopMath, ConstantControllerVelocityTracksAtTheSameVelocity)
 {
   TeleopLimits limits;
-  limits.moving_average_frames = 4;
+  limits.moving_average_samples = 4;
   TeleopIncrementMapper mapper(singleArmUprightMapping(), limits);
 
   const Eigen::Vector3d anchor(0.0, 1.0, 0.0);
@@ -338,7 +342,7 @@ TEST(TeleopMath, ConstantControllerVelocityTracksAtTheSameVelocity)
 TEST(TeleopMath, SmoothingTailAfterASuddenStopIsBounded)
 {
   TeleopLimits limits;
-  limits.moving_average_frames = 4;
+  limits.moving_average_samples = 4;
   TeleopIncrementMapper mapper(singleArmUprightMapping(), limits);
 
   const Eigen::Vector3d anchor(0.0, 1.0, 0.0);
@@ -431,11 +435,12 @@ TEST(TeleopMath, SignsApplyToTheFrameTheModeReadsIn)
   const Eigen::Vector3d controller(0.0, 1.0, 0.0);
   const Eigen::Quaterniond turned(Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitY()));
 
-  // Tool frame mode: the signs act on the tool's own axes, which is what the
-  // measured baseline's [1 -1 -1] were. A controller turn about its Y comes out
-  // as a tool turn about the tool's -Y.
+  // Tool logic: its signs act on the tool's own axes, which is what its measured
+  // calibration's [1 -1 -1] are. A controller turn about its Y comes out as a tool
+  // turn about the tool's -Y.
   AxisMapping tool_mapping = singleArmUprightMapping();
   tool_mapping.rotation_mode = RotationMapping::kTool;
+  tool_mapping.rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
   TeleopIncrementMapper tool_mapper(tool_mapping, testLimits());
   tool_mapper.start(controller, Eigen::Quaterniond::Identity());
   const CartesianTarget tool_target =
@@ -444,7 +449,7 @@ TEST(TeleopMath, SignsApplyToTheFrameTheModeReadsIn)
   EXPECT_NEAR(tool_applied.angle(), 0.1, 1e-6);
   EXPECT_NEAR(tool_applied.axis().y(), -1.0, 1e-6);
 
-  // World frame mode: the signs act on the robot's axes. The baseline carries
+  // Base-link logic: the signs act on the robot's axes. The baseline carries
   // the controller's Y to robot +Z, so the Z sign is the one that flips this
   // motion; giving Y the minus instead would leave it alone.
   AxisMapping world_mapping = singleArmUprightMapping();
@@ -689,6 +694,294 @@ TEST(JointRateLimiter, ReversesThroughZeroWithoutStalling)
     previous = current(0);
   }
   EXPECT_NEAR(current(0), -0.2, 1e-6);
+}
+
+/// The tick generator runs at the rate it was given, whatever the caller does.
+///
+/// This is the property that keeps the target on the node's clock: the caller's
+/// lateness changes when in the period a tick is noticed, never how many ticks
+/// there are per second. Ten seconds is deliberate - the schedule is an absolute
+/// grid computed in floating point, and a grid that loses a fraction of a period
+/// per tick still looks right over a tenth of a second.
+TEST(ControlTick, ProducesOneTickPerPeriod)
+{
+  ControlTick tick(100.0);
+  int ticks = 0;
+  double first = 0.0;
+  double last = 0.0;
+  for (int ms = 0; ms <= 10000; ++ms) {               // 1 ms poll, 100 Hz tick
+    const double now = static_cast<double>(ms) / 1000.0;
+    if (tick.due(now)) {
+      if (ticks == 0) {
+        first = now;
+      }
+      last = now;
+      ++ticks;
+    }
+  }
+  // The first call starts the schedule rather than firing, so ten seconds of
+  // calls hold one thousand ticks, the first of them one period in and the last
+  // of them on the second.
+  EXPECT_EQ(ticks, 1000);
+  EXPECT_NEAR(first, 0.01, 1e-9);
+  EXPECT_NEAR(last, 10.0, 1e-9);
+}
+
+/// A caller that is late is not a caller that gets extra ticks.
+///
+/// A thread can be descheduled for longer than a period - a garbage collection on
+/// the desktop, another process taking the core - and the ticks it missed are
+/// ticks for a target that has already moved on. Replaying them would ask for the
+/// same target several times in a row.
+TEST(ControlTick, DoesNotCatchUpAfterAMissedPeriod)
+{
+  ControlTick tick(100.0);
+  EXPECT_FALSE(tick.due(0.0));
+
+  // 240 ms later: the twenty four periods in between are gone, not delayed.
+  int ticks = 0;
+  for (double now = 0.25; now <= 0.252; now += 0.0005) {
+    ticks += tick.due(now) ? 1 : 0;
+  }
+  EXPECT_EQ(ticks, 1);
+  // And the schedule carries on from where it was, one period after that tick
+  // rather than one period after the late call.
+  EXPECT_TRUE(tick.due(0.27));
+}
+
+/// A rate that cannot be honoured is repaired.
+///
+/// The same reading every other limit in this file takes: a zero would divide by
+/// zero, and refusing to tick at all would look from the outside exactly like a
+/// node that started and then quietly stopped moving the arm.
+TEST(ControlTick, RepairsAnImpossibleRate)
+{
+  ControlTick zero(0.0);
+  EXPECT_FALSE(zero.due(0.0));
+  EXPECT_TRUE(zero.due(1.0));
+}
+
+/// A rate is a rate: the same hand speed gives the same twist whatever the tick.
+///
+/// This is what the velocity following mode is built on, and the property the
+/// increment form cannot have. The increment is the hand's motion over one
+/// arrival, so a late arrival carries more of it and a step sized by it is a step
+/// sized by the link's timing; the rate divides by the time the motion took, so
+/// the number that reaches the Jacobian is the operator's speed and nothing else.
+TEST(TeleopMath, HandRateIsIndependentOfTheTickLength)
+{
+  TeleopLimits limits = testLimits();
+  TeleopIncrementMapper mapper(singleArmUprightMapping(), limits);
+
+  const Eigen::Vector3d start = (Eigen::Vector3d() << 0.4, 0.2, 0.3).finished();
+  const Eigen::Quaterniond attitude = Eigen::Quaterniond::Identity();
+  // A hand travelling at 0.2 m/s along the robot's x, expressed in the headset
+  // frame: the mapping carries the robot axis back into the controller's.
+  const Eigen::Matrix3d hand_from_robot = singleArmUprightMapping().translation_remap;
+  const Eigen::Vector3d speed_in_hand_frame = hand_from_robot * Eigen::Vector3d(0.2, 0.0, 0.0);
+
+  mapper.start(start, attitude);
+
+  TeleopIncrementMapper quick(singleArmUprightMapping(), limits);
+  quick.start(start, attitude);
+  const CartesianTwist fast_tick = quick.feedRate(start + speed_in_hand_frame * 0.01, attitude, 0.01);
+
+  TeleopIncrementMapper slow(singleArmUprightMapping(), limits);
+  slow.start(start, attitude);
+  const CartesianTwist late_tick = slow.feedRate(start + speed_in_hand_frame * 0.025, attitude, 0.025);
+
+  ASSERT_TRUE(fast_tick.valid);
+  ASSERT_TRUE(late_tick.valid);
+  EXPECT_NEAR(fast_tick.linear.x(), 0.2, 1e-9);
+  EXPECT_NEAR(late_tick.linear.x(), 0.2, 1e-9);
+  EXPECT_NEAR(late_tick.linear.y(), 0.0, 1e-12);
+  EXPECT_NEAR(late_tick.linear.z(), 0.0, 1e-12);
+}
+
+/// The window averages rates over the time it covered, not over its samples.
+///
+/// With a uniform tick the two are the same thing, which is why this is easy to
+/// get wrong and never notice; with one late tick they are not, and the average
+/// of the samples would understate the speed of a hand that accelerated during
+/// the long one - the same class of error as dividing a step by the wrong dt.
+TEST(TeleopMath, HandRateAveragesOverTheTimeItCovered)
+{
+  TeleopLimits limits = testLimits();
+  limits.moving_average_samples = 2;
+  TeleopIncrementMapper mapper(singleArmUprightMapping(), limits);
+  const Eigen::Matrix3d hand_from_robot = singleArmUprightMapping().translation_remap;
+
+  const Eigen::Vector3d start = Eigen::Vector3d::Zero();
+  const Eigen::Quaterniond attitude = Eigen::Quaterniond::Identity();
+  mapper.start(start, attitude);
+
+  // First sample: 0.1 m/s for 10 ms. Second: 0.3 m/s for 30 ms. Over the two the
+  // hand covered 0.001 + 0.009 = 0.01 m in 40 ms, so it travelled at 0.25 m/s.
+  mapper.feedRate(start + hand_from_robot * Eigen::Vector3d(0.001, 0, 0), attitude, 0.01);
+  const CartesianTwist twist = mapper.feedRate(
+    start + hand_from_robot * Eigen::Vector3d(0.010, 0, 0), attitude, 0.03);
+
+  ASSERT_TRUE(twist.valid);
+  EXPECT_NEAR(twist.linear.x(), 0.25, 1e-9);
+}
+
+/// The profile starts from rest and never steps.
+///
+/// The first moment of following is the one the operator is most likely to
+/// notice, and a command that jumped to its full speed there would be a step in
+/// the field the firmware reads as the slew ceiling - the defect this mode exists
+/// to remove, moved to the start of the session.
+TEST(TeleopMath, VelocityProfileRampsFromRest)
+{
+  JointVelocityLimits limits;
+  limits.max_velocity = 2.0;
+  limits.max_acceleration = 20.0;
+  limits.filter_tau = 0.03;
+  JointVelocityProfile profile(limits, 1);
+
+  const Eigen::VectorXd target = (Eigen::VectorXd(1) << 1.0).finished();
+  const double dt = 0.01;
+  Eigen::VectorXd velocity = profile.apply(target, dt);
+  EXPECT_GT(velocity(0), 0.0);
+  double previous = velocity(0);
+  for (int cycle = 0; cycle < 60; ++cycle) {
+    velocity = profile.apply(target, dt);
+    // Bounded by the acceleration ceiling on the way up...
+    EXPECT_LE(velocity(0) - previous, limits.max_acceleration * dt + 1e-12);
+    previous = velocity(0);
+    EXPECT_LE(velocity(0), limits.max_velocity + 1e-12);
+  }
+  // ...and it gets there: the limit is a ramp, not a brake.
+  EXPECT_NEAR(velocity(0), 1.0, 1e-6);
+}
+
+/// A speed above the ceiling is cut, in both directions.
+TEST(TeleopMath, VelocityProfileClampsToTheCeiling)
+{
+  JointVelocityLimits limits;
+  limits.max_velocity = 0.5;
+  limits.max_acceleration = 1000.0;
+  limits.filter_tau = 0.0;
+  JointVelocityProfile profile(limits, 2);
+
+  const Eigen::VectorXd target = (Eigen::VectorXd(2) << 3.0, -3.0).finished();
+  Eigen::VectorXd velocity = profile.apply(target, 0.01);
+  for (int cycle = 0; cycle < 100; ++cycle) {
+    velocity = profile.apply(target, 0.01);
+  }
+  EXPECT_NEAR(velocity(0), 0.5, 1e-9);
+  EXPECT_NEAR(velocity(1), -0.5, 1e-9);
+}
+
+/// Integrating is the whole of "where the reference goes".
+TEST(TeleopMath, IntegratesAVelocityIntoAPosition)
+{
+  const Eigen::VectorXd position = (Eigen::VectorXd(1) << 0.1).finished();
+  const Eigen::VectorXd velocity = (Eigen::VectorXd(1) << 0.2).finished();
+  const Eigen::VectorXd next = integrateJointVelocity(
+    position, velocity, 0.05, Eigen::VectorXd(), Eigen::VectorXd());
+  EXPECT_NEAR(next(0), 0.11, 1e-12);
+}
+
+/// A joint at its limit stops there rather than running past it.
+///
+/// The hardware refuses the motion anyway, so a command that kept climbing
+/// outside the range would only build a difference that has to be given back the
+/// moment the operator reverses - which is the accumulation the velocity form
+/// exists to avoid.
+TEST(TeleopMath, IntegrationStopsAtTheJointLimits)
+{
+  const Eigen::VectorXd position = (Eigen::VectorXd(2) << 0.0, 0.0).finished();
+  const Eigen::VectorXd velocity = (Eigen::VectorXd(2) << 10.0, -10.0).finished();
+  const Eigen::VectorXd lower = (Eigen::VectorXd(2) << -0.5, -0.5).finished();
+  const Eigen::VectorXd upper = (Eigen::VectorXd(2) << 0.5, 0.5).finished();
+
+  const Eigen::VectorXd next = integrateJointVelocity(position, velocity, 0.05, lower, upper);
+  EXPECT_NEAR(next(0), 0.5, 1e-12);
+  EXPECT_NEAR(next(1), -0.5, 1e-12);
+}
+
+/// The tool tip moves faster than the wrist, by exactly the lever arm.
+///
+/// The operator's hand drives the tool tip and the arm's Jacobian is evaluated at
+/// the end effector link, so the twist has to be carried between the two; without
+/// this the arm turns at the right speed and translates at the wrong one,
+/// wherever the tool is offset from the link.
+TEST(TeleopMath, CarriesATwistAcrossAnOffset)
+{
+  CartesianTwist twist;
+  twist.linear = Eigen::Vector3d(0.1, 0.2, 0.3);
+  twist.angular = Eigen::Vector3d(0.0, 0.0, 1.0);   // 1 rad/s about z
+  twist.valid = true;
+
+  const Eigen::Vector3d offset(0.2, 0.0, 0.0);      // 20 cm along x
+  const CartesianTwist at_origin = twistAtOffset(twist, offset);
+
+  // A point 20 cm along x on a body spinning about z moves at +0.2 m/s in y, so
+  // the motion seen at the origin has 0.2 m/s less of it.
+  EXPECT_NEAR(at_origin.linear.x(), 0.1, 1e-12);
+  EXPECT_NEAR(at_origin.linear.y(), 0.2 - 0.2, 1e-12);
+  EXPECT_NEAR(at_origin.linear.z(), 0.3, 1e-12);
+  EXPECT_NEAR(at_origin.angular.z(), 1.0, 1e-12);
+  EXPECT_TRUE(at_origin.valid);
+}
+
+/// The lead guard leaves a small error alone and stops a large one.
+///
+/// The velocity form integrates, so without this a lagging arm accumulates the
+/// operator's motion in the reference until a joint limit stops it - measured on
+/// the fake firmware as a command asking for the full 2 rad/s on a quarter of the
+/// samples of an ordinary recorded episode.
+TEST(TeleopMath, LeadScaleGuardsTheIntegratedReference)
+{
+  // Inside the soft band: the arm's ordinary tracking error, not a runaway.
+  EXPECT_DOUBLE_EQ(leadScale((Eigen::VectorXd(2) << 0.01, -0.02).finished(), 0.2), 1.0);
+  // At the margin: the command is zero, so the reference stops running away.
+  EXPECT_DOUBLE_EQ(leadScale((Eigen::VectorXd(1) << 0.2).finished(), 0.2), 0.0);
+  EXPECT_DOUBLE_EQ(leadScale((Eigen::VectorXd(1) << -0.3).finished(), 0.2), 0.0);
+  // In between: a continuous ramp, so the scaling cannot chatter.
+  const double half = leadScale((Eigen::VectorXd(1) << 0.15).finished(), 0.2);
+  EXPECT_GT(half, 0.0);
+  EXPECT_LT(half, 1.0);
+  // The worst joint decides for all of them, so the command keeps its direction.
+  const double mixed = leadScale((Eigen::VectorXd(2) << 0.001, 0.15).finished(), 0.2);
+  EXPECT_NEAR(mixed, half, 1e-12);
+  // Disabled, and an empty command.
+  EXPECT_DOUBLE_EQ(leadScale((Eigen::VectorXd(1) << 9.0).finished(), 0.0), 1.0);
+  EXPECT_DOUBLE_EQ(leadScale(Eigen::VectorXd(), 0.2), 1.0);
+}
+
+/// A trigger resting near its threshold must not oscillate.
+///
+/// Measured on the rig this was written for: an analogue trigger nobody was
+/// touching produced an open/close pair every half second, at exactly the minimum
+/// close window, because the value wandered across a single threshold. A debounce
+/// cannot fix that - it only asks the signal to stay put for 50 ms, which a slow
+/// wobble does - so the press and the release happen at two different values.
+TEST(TeleopMath, TriggerHasHysteresis)
+{
+  const double press_at = 0.5;
+  const double hysteresis = 0.1;
+
+  // From released, it takes a value above the threshold to press.
+  EXPECT_FALSE(triggerPressed(0.50, false, press_at, hysteresis));
+  EXPECT_TRUE(triggerPressed(0.51, false, press_at, hysteresis));
+
+  // Once pressed, a wobble below the threshold keeps it pressed...
+  EXPECT_TRUE(triggerPressed(0.45, true, press_at, hysteresis));
+  EXPECT_TRUE(triggerPressed(0.41, true, press_at, hysteresis));
+
+  // ...and only a release past the far threshold opens it.
+  EXPECT_FALSE(triggerPressed(0.39, true, press_at, hysteresis));
+
+  // The band is directional: released inside it stays released, so a value that
+  // sits in the band cannot produce an edge at all.
+  EXPECT_FALSE(triggerPressed(0.45, false, press_at, hysteresis));
+
+  // Zero hysteresis is the bare threshold, which is what oscillated.
+  EXPECT_FALSE(triggerPressed(0.499, false, press_at, 0.0));
+  EXPECT_TRUE(triggerPressed(0.501, false, press_at, 0.0));
+  EXPECT_FALSE(triggerPressed(0.499, true, press_at, 0.0));
 }
 
 }  // namespace

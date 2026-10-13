@@ -57,6 +57,22 @@ jobs:
           repository: nexform-tech/litearm-moveit2
           path: ws/src/litearm-moveit2
 
+      # The launch argument test opens litegrip_ros2_control's own xacro and
+      # compares the component arguments the launch file sets against the ones
+      # the component reads, so that package has to be in the workspace - and it
+      # is built on the gripper's SDK.
+      - name: Checkout litegrip-ros2
+        uses: actions/checkout@v4
+        with:
+          repository: nexform-tech/litegrip-ros2
+          path: ws/src/litegrip-ros2
+
+      - name: Checkout litegrip-cpp
+        uses: actions/checkout@v4
+        with:
+          repository: nexform-tech/litegrip-cpp
+          path: ws/src/litegrip-cpp
+
       - name: Install build dependencies
         run: |
           apt-get update
