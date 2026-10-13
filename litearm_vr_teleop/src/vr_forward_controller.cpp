@@ -352,18 +352,24 @@ controller_interface::return_type VrForwardController::update(
   // from the receipt times, and floored so that a burst of commands cannot ask
   // for an unbounded velocity.
   double command_interval = period.seconds();
+  bool new_command = false;
   if (receipt != nullptr && *receipt >= 0.0 && *receipt != last_command_receipt_) {
     if (last_command_receipt_ >= 0.0) {
       command_interval = std::max(kMinCommandInterval, *receipt - last_command_receipt_);
     }
     last_command_receipt_ = *receipt;
+    // Only this cycle has a step to differentiate. See ForwardCommandTracker:
+    // recomputing the velocity on the cycles in between puts zero in the field,
+    // and a zero slew ceiling half the time is an arm that moves half as far as
+    // it was told to.
+    new_command = true;
   }
 
   // No command has ever arrived: hold where the arm is. `reset()` at activation
   // already put the tracker at the measured pose, so passing a null target here
   // is a hold, not a move to zero.
   tracker_->update(
-    has_target_ ? &target_ : nullptr, measured_, command_age, command_interval,
+    has_target_ ? &target_ : nullptr, measured_, command_age, new_command, command_interval,
     command_positions_, command_velocities_);
 
   for (std::size_t i = 0; i < count; ++i) {

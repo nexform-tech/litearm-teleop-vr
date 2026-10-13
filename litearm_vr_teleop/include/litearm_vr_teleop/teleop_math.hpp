@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -283,6 +284,101 @@ public:
 private:
   TeleopLimits limits_;
   Eigen::VectorXd low_passed_;
+  bool seeded_ = false;
+};
+
+/// Ceilings on how fast the commanded joints may change, and how fast that
+/// change may itself change.
+///
+/// These are the numbers a motion profile is made of, and they exist because of
+/// what the firmware does with the velocity the controller writes: it reads that
+/// field as the slew ceiling of the position reference. A command stream whose
+/// velocity steps - which is what a joint target that jumps by a few
+/// hundredths of a radian between two commands produces - therefore asks the
+/// firmware for a step in speed, and the field ends up pinned at its ceiling
+/// instead of describing the motion. Bounding the velocity, then the
+/// acceleration, then the jerk turns that stream into a curve the firmware can
+/// follow, at the cost of the arm taking a little longer to reach a new target.
+///
+/// The defaults are a rated joint speed of 2 rad/s (the arm's own figure, the
+/// same one `TeleopLimits::max_joint_velocity` carries), reaching it in 0.1 s,
+/// and reaching full acceleration in 20 ms. The jerk ceiling is high because it
+/// is there to soften the ends of a move, not to make the arm slow: it is what
+/// stops the velocity from stepping, and a ceiling that also delays the
+/// deceleration is a ceiling that makes the arm overshoot. They are a starting
+/// point to tune against what the arm actually does, not measurements.
+struct JointRateLimits
+{
+  /// Ceiling on the joint speed, in rad/s. Same meaning as
+  /// `TeleopLimits::max_joint_velocity`, and the limiter takes over that job
+  /// when it is in the chain.
+  double max_velocity = 2.0;
+  /// Ceiling on the joint acceleration, in rad/s^2. A step in velocity is spread
+  /// over `step / max_acceleration` seconds.
+  double max_acceleration = 20.0;
+  /// Ceiling on the rate of change of the acceleration, in rad/s^3. This is what
+  /// makes the velocity curve an S rather than a ramp: the acceleration cannot
+  /// jump from zero to its ceiling either, so a motion starts and ends softly.
+  double max_jerk = 1000.0;
+};
+
+/// Turns a stream of joint targets into a command whose speed, acceleration and
+/// jerk are all bounded.
+///
+/// The limiter carries two states per joint - the speed it is asking for and the
+/// acceleration it is using - and works out, every cycle, the fastest speed the
+/// joint may hold and still stop on its target. That speed comes from the
+/// stopping law `v^2 / (2 a) + v a / (2 j) <= s`, solved for the speed rather
+/// than for the distance, with one more term for the time the loop and the
+/// acceleration ramp take. The speed state is then chased towards it by a first
+/// order loop, and the result is limited twice: the speed may not change faster
+/// than `max_acceleration`, and that acceleration may not change faster than
+/// `max_jerk`.
+///
+/// Working out a speed limit rather than deciding when to start braking is the
+/// point of the design. A decision has to be latched or it chatters, and a
+/// latched brake holds full deceleration until it releases, which stalls the
+/// joint in the middle of a move. A limit is a smooth function of the distance,
+/// so there is nothing to switch and nothing to chatter.
+///
+/// Three properties make it safe in front of an operator. It never steps past
+/// the target: the step it returns is clipped to the remaining distance, so a
+/// limiter that has fallen behind stops where it is asked to instead of
+/// oscillating around the target. It has unit gain at steady state, because the
+/// limit includes the target's own rate as a feed forward - a target moving at a
+/// constant rate is held at that rate with no distance left over, which is the
+/// property the joint filter below it was written to preserve. And it never asks
+/// to move away from the target, so a joint that has arrived stays arrived.
+class JointRateLimiter
+{
+public:
+  JointRateLimiter(JointRateLimits limits, std::size_t dof);
+
+  /// Returns the joint values to command for this cycle.
+  ///
+  /// `target` is where the joints should end up (the inverse kinematics result,
+  /// already filtered), `current` is the measured joint state, and `dt` is this
+  /// cycle's interval. A zero or negative `dt` is treated as the smallest
+  /// interval worth dividing by, so a starved loop cannot authorise a step.
+  Eigen::VectorXd apply(
+    const Eigen::VectorXd & target, const Eigen::VectorXd & current, double dt);
+
+  /// Forget the velocity and acceleration. The next call starts from rest, so
+  /// resuming after a pause does not begin with a step, and does not inherit a
+  /// velocity the operator asked for minutes ago.
+  void reset();
+
+private:
+  JointRateLimits limits_;
+  /// How hard the speed loop chases the limit curve, in 1/s. At 50 the loop
+  /// settles in about 20 ms, which is fast enough to follow the curve closely
+  /// and slow enough to be stable at a 10 ms cycle.
+  double speed_gain_ = 50.0;
+  Eigen::VectorXd velocity_;
+  Eigen::VectorXd acceleration_;
+  /// The target the previous cycle was given, so the limiter can tell a target
+  /// that is moving from one that has stopped.
+  Eigen::VectorXd previous_target_;
   bool seeded_ = false;
 };
 

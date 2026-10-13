@@ -235,6 +235,11 @@ if(BUILD_TESTING)
   endif()
 
   ament_add_gtest(test_forward_command test/test_forward_command.cpp)
+  # Header only: the test needs the include directory, not the math library.
+  ament_add_gtest(test_conditioning_guard test/test_conditioning_guard.cpp)
+  if(TARGET test_conditioning_guard)
+    target_include_directories(test_conditioning_guard PRIVATE include)
+  endif()
   if(TARGET test_forward_command)
     target_link_libraries(test_forward_command litearm_vr_teleop_math)
   endif()

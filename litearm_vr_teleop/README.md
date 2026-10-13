@@ -166,6 +166,76 @@ because the target is re-based on the measured pose every frame, so a deadband o
 0.5 mm at 72 Hz acts as a velocity threshold of 3.6 cm/s. Zero means the solver
 sees every change.
 
+### The velocity is a curve, not a step and a zero
+
+Two things decide what the firmware sees in the velocity field, and both of them
+had to be fixed before the field was worth plotting.
+
+The controller runs at 100 Hz and the command stream does not: the node solves
+inverse kinematics per command, so most control cycles have no arrival in them.
+The velocity was recomputed every cycle, from the step of a setpoint that had not
+changed since the last one - which is zero. The field therefore went to zero
+between arrivals and back to the honest value on the next one. The firmware
+advances the position reference at the ceiling it is given, so a ceiling of zero
+half the time is an arm that moves half as far as it was told to, and a velocity
+plot of a session shows a band of spikes. The velocity is now worked out on the
+cycle a setpoint arrives and held until the next one.
+
+The node then gives that stream an actual motion profile: `max_joint_acceleration`
+(20 rad/s^2 by default) bounds how fast the speed may change and `max_joint_jerk`
+(1000 rad/s^3) bounds how fast that change may itself change, so a move starts and
+ends softly instead of asking for a step in speed. The limiter works out the
+fastest speed a joint may hold and still stop on its target, from the stopping law
+`v^2 / (2 a) + v a / (2 j) <= s` solved for the speed, and it includes the
+target's own rate as a feed forward, so a hand moving steadily is followed at that
+rate with no permanent offset. Tune `max_joint_acceleration` first: it is the
+number the operator feels. A lower `max_joint_jerk` is not "smoother" - it also
+delays the deceleration, which makes the arm overshoot instead of approaching.
+
+### Where the solve runs, and what the stream is made of
+
+Inverse kinematics runs on its own thread and hands its latest solution to the
+publishing timer through a single slot. The timer produces the command stream at
+its configured rate from whatever is in that slot, and the joint filter and rate
+limiter interpolate between solutions. This is what makes the stream independent
+of the solver: with the plugin backend on the reference machine a solve takes
+tens of milliseconds, and while it ran on the control path the command stream
+inherited that period. On mock hardware, where the state mirrors the command,
+that is visible as a staircase in a position plot - flat, step, flat - and the
+arm looks like it moves in jumps rather than continuously.
+
+One slot, deliberately, not a queue: a queue would trade latency for smoothness,
+and teleoperation cannot pay that. A slow solve now delays the target by its own
+duration and nothing else. The transitions in and out of following are signalled
+to the solver by a generation counter, so the mapper - which is not thread safe
+and belongs to the solver - is only ever started and reset by the thread that
+uses it.
+
+### Near a singularity the solve is damped
+
+The configured plugin's answer stops being a function of the target when the
+Jacobian is ill conditioned. Measured on this arm at a wrist that is nearly
+straight: a minimum singular value of 0.028, and a few millimetres of hand motion
+move a joint by hundreds of milliradians - with the arm as likely to go up as
+down, so an operator finds a direction they cannot command, and the node's own
+warning reports the target as unreachable.
+
+`damping_singular_value` (0.05 by default, 0 disables) is the threshold below
+which the damped least squares backend answers instead, whatever `ik_backend`
+names. A damped solve stays continuous through the same region; it says so in the
+log, because the residual it accepts there is larger. Filtering cannot fix this:
+a filter can only make a wrong direction slower.
+
+### The command stream has to be able to move both ways
+
+The rate limiter works its speed limit out in the frame of "towards the target",
+because the limit is a distance and a distance has no sign. The acceleration that
+comes out of that has to be turned back into the joint's own frame before it is
+applied. Doing it the other way round produces a limiter that only ever moves one
+way: a joint whose target is below it is told to accelerate upwards, the step
+guard refuses the step, and the target is never reached. Two tests pin this down,
+one for each direction, and one for a reversal through zero.
+
 ### The tracking ratio, and the one switch that changes it
 
 The mapping is velocity form and re-bases its target on the measured pose every
@@ -177,7 +247,16 @@ mock hardware (no lag) a 12 cm hand move delivers about 60 percent; the sim
 launch's own documentation quotes about a quarter. An operator experiences that
 as "I have to move my hand a long way before the arm does anything".
 
-`reference_pose: commanded` accumulates on the last commanded pose instead, so
+`reference_pose` defaults to `commanded`, which accumulates on the last commanded
+pose instead of rebuilding the target from where the arm is. The reason is a
+measurement: in `measured` mode the solver's residual - a few tenths of a
+millimetre, ordinary for an iterative solver - is fed back into the next frame's
+target through the arm's own pose, and that loop has no damping in it. With a hand
+held still on the mock hardware every joint oscillated peak to peak by 0.6 to 3.7
+mrad and changed direction on nearly every frame, which is the regular sawtooth a
+position plot shows. On the commanded pose the same measurement is 0.00000 rad.
+
+It accumulates on the last commanded pose instead, so
 the arm's shortfall is carried and delivered as soon as the arm can take it, and
 `max_target_lead_m` / `max_target_lead_rad` bound how far ahead the target may
 run. It ships **off**: restoring the tracking ratio is a decision to make after

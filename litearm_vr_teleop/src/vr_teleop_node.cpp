@@ -23,6 +23,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -40,6 +43,7 @@
 
 #include "litearm_vr_teleop/joint_move.hpp"
 #include "litearm_vr_teleop/msg/vr_controller_frame.hpp"
+#include "litearm_vr_teleop/conditioning_guard.hpp"
 #include "litearm_vr_teleop/teleop_math.hpp"
 #include "litearm_vr_teleop/teleop_planner.hpp"
 #include "litearm_vr_teleop/teleop_start_pose.hpp"
@@ -99,10 +103,20 @@ public:
   /// Separate from the constructor because the planner hands the node to MoveIt's
   /// model loader and to the kinematics plugin, and doing that in the constructor
   /// would mean handing out a half-built object.
+  /// Stop the solver before anything it uses is torn down.
+  ~VrTeleopNode()
+  {
+    running_ = false;
+    if (solve_thread_.joinable()) {
+      solve_thread_.join();
+    }
+  }
+
   void initialize()
   {
     mapper_ = std::make_unique<TeleopIncrementMapper>(buildAxisMapping(), teleop_limits_);
     filter_ = std::make_unique<JointTargetFilter>(teleop_limits_, joint_names_.size());
+    limiter_ = std::make_unique<JointRateLimiter>(rate_limits_, joint_names_.size());
 
     // The mapping is settable while the node runs, because the only person who
     // can tell whether a sign is right is the one holding the controller, and
@@ -132,37 +146,70 @@ public:
     command_publisher_ = create_publisher<std_msgs::msg::Float64MultiArray>(
       command_topic_, rclcpp::SystemDefaultsQoS());
 
+    // Every callback of this node is in one mutually exclusive group: the timer,
+    // both subscriptions and the two services never run at the same time. That
+    // is why only the solver thread needs a lock - the state it reads is written
+    // by a group of callbacks that cannot be in the middle of a write when
+    // another of them runs.
+    callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions subscription_options;
+    subscription_options.callback_group = callback_group_;
+
     frame_subscription_ = create_subscription<msg::VrControllerFrame>(
       frame_topic_, rclcpp::SystemDefaultsQoS(),
-      [this](const msg::VrControllerFrame::SharedPtr frame) {onFrame(frame);});
+      [this](const msg::VrControllerFrame::SharedPtr frame) {onFrame(frame);}, subscription_options);
 
     joint_state_subscription_ = create_subscription<sensor_msgs::msg::JointState>(
       joint_state_topic_, rclcpp::SensorDataQoS(),
-      [this](const sensor_msgs::msg::JointState::SharedPtr state) {onJointState(state);});
+      [this](const sensor_msgs::msg::JointState::SharedPtr state) {onJointState(state);},
+      subscription_options);
 
     stop_service_ = create_service<std_srvs::srv::Trigger>(
       "~/stop",
       [this](
         const std::shared_ptr<std_srvs::srv::Trigger::Request>,
-        std::shared_ptr<std_srvs::srv::Trigger::Response> response) {onStop(response);});
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response) {onStop(response);},
+      rmw_qos_profile_services_default, callback_group_);
     start_service_ = create_service<std_srvs::srv::Trigger>(
       "~/start",
       [this](
         const std::shared_ptr<std_srvs::srv::Trigger::Request>,
-        std::shared_ptr<std_srvs::srv::Trigger::Response> response) {onStart(response);});
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response) {onStart(response);},
+      rmw_qos_profile_services_default, callback_group_);
 
     if (gripper_enabled_) {
       gripper_client_ = rclcpp_action::create_client<GripperCommand>(this, gripper_action_);
     }
 
+    running_ = true;
+    solve_thread_ = std::thread([this]() {solveLoop();});
+
+    // The inverse kinematics runs on its own thread from here on. This is the
+    // "buffer" half of the design: the solve costs what it costs, and the
+    // command stream is produced by the timer from the latest solution at the
+    // control rate, interpolated by the joint filter and the rate limiter. A
+    // solve that takes 70 ms then delays the target by 70 ms instead of
+    // quantizing the command stream into 70 ms steps.
     const double rate = std::max(1.0, control_rate_hz_);
-    timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / rate), [this]() {tick();});
+    timer_ = create_wall_timer(
+      std::chrono::duration<double>(1.0 / rate), [this]() {tick();}, callback_group_);
 
     RCLCPP_INFO(
       get_logger(),
       "VR teleop ready: frames on '%s', commands on '%s' at %.1f Hz, planning backend '%s'",
       frame_topic_.c_str(), command_topic_.c_str(), rate,
       planner_ready_ ? planner_->backendName().c_str() : "unavailable");
+    RCLCPP_INFO(
+      get_logger(),
+      "inverse kinematics runs on its own thread; the command stream is published at %.1f Hz "
+      "from the latest solution%s", control_rate_hz_,
+      damping_singular_value_ > 0.0 ?
+      ", with the damped backend taking over below a minimum singular value of " : "");
+    if (damping_singular_value_ > 0.0) {
+      RCLCPP_INFO(
+        get_logger(), "  singular value threshold %.4f (parameter damping_singular_value)",
+        damping_singular_value_);
+    }
     RCLCPP_INFO(
       get_logger(),
       "start pose (grasp_ready) [%.6f %.6f %.6f %.6f %.6f %.6f %.6f], returned to at %.2f rad/s",
@@ -269,6 +316,20 @@ private:
     teleop_limits_.low_pass_tau = readParameter<double>("low_pass_tau", 0.02);
     teleop_limits_.moving_average_frames = static_cast<std::size_t>(
       std::max(1, readParameter<int>("moving_average_frames", 10)));
+
+    // The motion profile of the command stream: how fast the joints may move,
+    // how fast that speed may change, and how fast the change of speed may
+    // change. See JointRateLimits for why the firmware makes these matter.
+    rate_limits_.max_velocity =
+      readParameter<double>("max_joint_velocity", rate_limits_.max_velocity);
+    rate_limits_.max_acceleration =
+      readParameter<double>("max_joint_acceleration", rate_limits_.max_acceleration);
+    rate_limits_.max_jerk = readParameter<double>("max_joint_jerk", rate_limits_.max_jerk);
+
+    // Below this Jacobian minimum singular value the configured solver's answer
+    // jumps between configurations, so the damped backend answers instead. Zero
+    // turns the guard off.
+    damping_singular_value_ = readParameter<double>("damping_singular_value", 0.05);
 
     // How the controller's rotation reaches the tool. `world` is the geometric
     // default: the tool turns about the same world axis as the controller,
@@ -435,10 +496,15 @@ private:
       return;
     }
 
-    latest_frame_ = *frame;
-    last_frame_time_ = steadySeconds();
-    latest_frame_valid_ = true;
-    ++frame_sequence_;
+    {
+      // The solver thread reads these; the callbacks are serialised against each
+      // other, so this lock is only ever contested by the solver.
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      latest_frame_ = *frame;
+      last_frame_time_ = steadySeconds();
+      latest_frame_valid_ = true;
+      ++frame_sequence_;
+    }
   }
 
   void onJointState(const sensor_msgs::msg::JointState::SharedPtr state)
@@ -460,8 +526,11 @@ private:
       positions(static_cast<Eigen::Index>(i)) =
         state->position[static_cast<std::size_t>(std::distance(state->name.begin(), found))];
     }
-    measured_ = positions;
-    have_measured_ = true;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      measured_ = positions;
+      have_measured_ = true;
+    }
   }
 
   void onStop(const std::shared_ptr<std_srvs::srv::Trigger::Response> & response)
@@ -469,10 +538,10 @@ private:
     // Stopping is idempotent and always allowed. Everything else waits for an
     // explicit start.
     phase_ = Phase::kStopped;
-    mapper_->reset();
     filter_->reset();
+    limiter_->reset();
     start_move_.reset();
-    clearFollowState();
+    restartFollow();
     saw_grip_ = false;
     response->success = true;
     response->message = "stopped; the arm holds where it is until ~/start is called";
@@ -523,7 +592,7 @@ private:
       }
     }
 
-    switch (phase_) {
+    switch (phase_.load()) {
       case Phase::kWaitingForState:
       case Phase::kIdle:
       case Phase::kStopped:
@@ -562,10 +631,10 @@ private:
     if (!pressed && saw_grip_) {
       saw_grip_ = false;
       if (phase_ == Phase::kFollowing || phase_ == Phase::kReturningToStart) {
-        mapper_->pause();
         filter_->reset();
+        limiter_->reset();
         start_move_.reset();
-        clearFollowState();
+        restartFollow();
         phase_ = Phase::kIdle;
         RCLCPP_INFO(
           get_logger(), "grip released: holding. The next press returns to the start pose");
@@ -624,10 +693,10 @@ private:
       return;
     }
 
-    mapper_->reset();
     filter_->reset();
+    limiter_->reset();
     start_move_.reset();
-    clearFollowState();
+    restartFollow();
     saw_grip_ = false;
     phase_ = Phase::kIdle;
     latest_frame_valid_ = false;
@@ -649,7 +718,8 @@ private:
     start_move_ = std::make_unique<JointMoveProfile>(
       measured_, start_pose_, speed, accel, planner_->lowerLimits(), planner_->upperLimits());
     filter_->reset();
-    clearFollowState();
+    limiter_->reset();
+    restartFollow();
     phase_ = Phase::kReturningToStart;
     RCLCPP_INFO(
       get_logger(),
@@ -681,19 +751,85 @@ private:
       return;
     }
 
-    mapper_->start(
-      Eigen::Vector3d(
-        latest_frame_.position.x, latest_frame_.position.y, latest_frame_.position.z),
-      Eigen::Quaterniond(
-        latest_frame_.quaternion.w, latest_frame_.quaternion.x, latest_frame_.quaternion.y,
-        latest_frame_.quaternion.z).normalized());
     filter_->reset();
-    clearFollowState();
+    limiter_->reset();
+    restartFollow();
     phase_ = Phase::kFollowing;
     RCLCPP_INFO(get_logger(), "start pose reached: following the controller");
   }
 
-  void stepFollowing(double dt)
+  // ----------------------------------------------------------- the solver thread
+
+  /// What the solver thread reads each pass, copied under the lock.
+  struct SolverInput
+  {
+    msg::VrControllerFrame frame;
+    bool frame_valid = false;
+    std::size_t sequence = 0;
+    Eigen::VectorXd measured;
+    bool measured_valid = false;
+    Phase phase = Phase::kIdle;
+    uint64_t generation = 0;
+  };
+
+  SolverInput takeSolverInput()
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    SolverInput input;
+    input.frame = latest_frame_;
+    input.frame_valid = latest_frame_valid_;
+    input.sequence = frame_sequence_;
+    input.measured = measured_;
+    input.measured_valid = have_measured_;
+    input.phase = phase_;
+    input.generation = follow_generation_;
+    return input;
+  }
+
+  /// Hand the latest solution to the publishing timer, or say there is none.
+  void publishSolution(const Eigen::VectorXd & joints, bool valid)
+  {
+    std::lock_guard<std::mutex> lock(solution_mutex_);
+    commanded_joints_ = joints;
+    have_solution_ = valid;
+  }
+
+  /// Run inverse kinematics as fast as the backend allows, off the control path.
+  ///
+  /// This is the other half of the buffer, and the half that decides whether a
+  /// slow solve is felt. The solve costs what it costs; with it on the control
+  /// path, a backend that takes 70 ms per solve turns the command stream into
+  /// 70 ms steps - on mock hardware, where the state mirrors the command, that
+  /// is exactly the staircase a position plot shows. Off the path, the same
+  /// solve delays the target by 70 ms and nothing else.
+  void solveLoop()
+  {
+    while (running_) {
+      const SolverInput input = takeSolverInput();
+      if (input.generation != solver_generation_) {
+        solver_generation_ = input.generation;
+        processed_sequence_ = 0;
+        clearFollowState();
+        if (input.phase == Phase::kFollowing && input.frame_valid) {
+          mapper_->start(
+            Eigen::Vector3d(
+              input.frame.position.x, input.frame.position.y, input.frame.position.z),
+            Eigen::Quaterniond(
+              input.frame.quaternion.w, input.frame.quaternion.x, input.frame.quaternion.y,
+              input.frame.quaternion.z).normalized());
+        } else {
+          mapper_->reset();
+        }
+      }
+      if (input.phase == Phase::kFollowing && input.measured_valid) {
+        solveFollowing(input);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  /// One following step: map the hand, solve, hand the solution over.
+  void solveFollowing(const SolverInput & input)
   {
     // One solve per headset frame, not one per control cycle.
     //
@@ -709,16 +845,16 @@ private:
     // instead - the firmware's watchdog wants a continuous stream, not a new
     // target - and the joint filter keeps easing toward it, which is also what
     // turns one frame's step into a short ramp instead of a step.
-    const bool new_frame = latest_frame_valid_ && frame_sequence_ != processed_sequence_;
+    const bool new_frame = input.frame_valid && input.sequence != processed_sequence_;
     if (new_frame) {
-      processed_sequence_ = frame_sequence_;
+      processed_sequence_ = input.sequence;
 
       Eigen::Vector3d ee_position;
       Eigen::Matrix3d ee_rotation;
-      if (!planner_->forwardKinematics(measured_, ee_position, ee_rotation)) {
+      if (!planner_->forwardKinematics(input.measured, ee_position, ee_rotation)) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 2000, "forward kinematics failed; holding");
-        publishHold();
+        publishSolution(Eigen::VectorXd(), false);
         return;
       }
 
@@ -737,10 +873,10 @@ private:
 
       const CartesianTarget target = mapper_->feed(
         Eigen::Vector3d(
-          latest_frame_.position.x, latest_frame_.position.y, latest_frame_.position.z),
+          input.frame.position.x, input.frame.position.y, input.frame.position.z),
         Eigen::Quaterniond(
-          latest_frame_.quaternion.w, latest_frame_.quaternion.x, latest_frame_.quaternion.y,
-          latest_frame_.quaternion.z).normalized(),
+          input.frame.quaternion.w, input.frame.quaternion.x, input.frame.quaternion.y,
+          input.frame.quaternion.z).normalized(),
         reference_position, reference_rotation);
 
       if (target.valid) {
@@ -765,7 +901,8 @@ private:
     }
 
     if (!have_cartesian_target_) {
-      publishHold();
+      // Nothing to follow: the timer holds at the measured pose.
+      publishSolution(Eigen::VectorXd(), false);
       return;
     }
 
@@ -775,11 +912,29 @@ private:
       // the same answer, so a target that is not moving produces a command that
       // is not moving either, and the redundant axis stays where the last
       // solution put it instead of wandering through the null space.
-      const Eigen::VectorXd & seed = have_commanded_joints_ ? commanded_joints_ : measured_;
-      const TeleopPlanner::Solution solution =
-        planner_->solve(
-        cartesian_target_.position - cartesian_target_.rotation * tcp_offset_,
-        cartesian_target_.rotation, seed);
+      const Eigen::VectorXd & seed = have_commanded_joints_ ? commanded_joints_ : input.measured;
+      const Eigen::Vector3d solve_position =
+        cartesian_target_.position - cartesian_target_.rotation * tcp_offset_;
+      TeleopPlanner::Solution solution =
+        planner_->solve(solve_position, cartesian_target_.rotation, seed);
+
+      // Near a singularity the configured solver's answer stops being a function
+      // of the target: a few millimetres of hand motion move a joint by half a
+      // radian, the arm is as likely to go up as down, and the operator finds a
+      // direction they cannot command. The damped backend stays continuous
+      // through the same region, so it answers instead - and says so, because
+      // the residual it accepts there is larger.
+      const double conditioning = planner_->minimumSingularValue(seed);
+      if (
+        planner_options_.backend != TeleopPlanner::IkBackend::kDls &&
+        conditioningNeedsDamping(conditioning, damping_singular_value_))
+      {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "near a singularity (minimum singular value %.4f): solving with the damped backend, "
+          "which does not jump between configurations", conditioning);
+        solution = planner_->solveDamped(solve_position, cartesian_target_.rotation, seed);
+      }
 
       if (!solution.converged) {
         // Holding beats commanding a solution that does not reach the target:
@@ -790,8 +945,8 @@ private:
           "target unreachable (position off by %.4f m, rotation off by %.4f rad, minimum singular "
           "value %.4f); holding",
           solution.position_residual, solution.rotation_residual,
-          planner_->minimumSingularValue(measured_));
-        publishHold();
+          planner_->minimumSingularValue(input.measured));
+        publishSolution(Eigen::VectorXd(), false);
         return;
       }
 
@@ -800,7 +955,51 @@ private:
       have_solution_ = true;
     }
 
-    publishPositions(filter_->apply(commanded_joints_, measured_, dt));
+    // The solution is handed to the publishing timer, which turns it into a
+    // command at the control rate. Nothing is published from this thread: the
+    // point of the split is that a slow solve delays the target instead of
+    // quantizing the stream.
+    publishSolution(commanded_joints_, true);
+  }
+
+
+
+  void stepFollowing(double dt)
+  {
+    // The command stream is produced here, at the control rate, from whatever the
+    // solver thread has most recently handed over: a single slot holding the
+    // latest solution, never a queue, because a queue would trade latency for
+    // smoothness and teleoperation cannot pay that. Between solutions the same
+    // target is republished and the joint filter and the rate limiter keep
+    // easing toward it, so the stream is continuous even when the solve is not.
+    Eigen::VectorXd solution;
+    bool valid = false;
+    {
+      std::lock_guard<std::mutex> lock(solution_mutex_);
+      solution = commanded_joints_;
+      valid = have_solution_;
+    }
+    if (!valid) {
+      publishHold();
+      return;
+    }
+    const Eigen::VectorXd filtered = filter_->apply(solution, measured_, dt);
+    publishPositions(limiter_->apply(filtered, measured_, dt));
+  }
+
+  /// Tell the solver thread that the session it was solving for has ended.
+  ///
+  /// Every transition in and out of following goes through here. The callbacks
+  /// never touch the mapper any more: it is not thread safe, it belongs to the
+  /// solver, and the solver is what resets or starts it - when it sees this
+  /// generation change, and knows from the phase whether to start or to reset.
+  void restartFollow()
+  {
+    {
+      std::lock_guard<std::mutex> lock(solution_mutex_);
+      have_solution_ = false;
+    }
+    ++follow_generation_;
   }
 
   /// Forget the follow state: the cached target, the cached solution and the
@@ -822,6 +1021,13 @@ private:
     // A hold is published rather than implied by silence. Silence would leave the
     // controller writing its last setpoint until its own staleness timeout, which
     // is a fraction of a second of travel nobody asked for.
+    //
+    // The rate limiter is put back to rest, because a hold is the arm standing
+    // still: without this, a refused solution or a pause would leave the limiter
+    // holding a velocity it was asking for when the last accepted target was
+    // still in front of it, and the first command after the hold would start at
+    // that speed instead of from zero.
+    limiter_->reset();
     publishPositions(measured_);
   }
 
@@ -903,13 +1109,19 @@ private:
   std::unique_ptr<TeleopPlanner> planner_;
   std::unique_ptr<TeleopIncrementMapper> mapper_;
   std::unique_ptr<JointTargetFilter> filter_;
+  std::unique_ptr<JointRateLimiter> limiter_;
+  JointRateLimits rate_limits_;
   bool planner_ready_ = false;
   std::string planner_error_;
 
   // State.
-  Phase phase_ = Phase::kWaitingForState;
+  /// Atomic because the solver thread reads it: the callbacks are serialised
+  /// against each other, but not against the solver.
+  std::atomic<Phase> phase_{Phase::kWaitingForState};
+  /// Written by the joint state callback under state_mutex_, read by the timer
+  /// on its own thread and by the solver through a locked snapshot.
   Eigen::VectorXd measured_;
-  bool have_measured_ = false;
+  std::atomic<bool> have_measured_{false};
   CartesianTarget cartesian_target_;
   /// tip_link -> TCP, in the tip frame (config/tcp.yaml).
   Eigen::Vector3d tcp_offset_ = Eigen::Vector3d(0.0, 0.0, 0.18);
@@ -934,10 +1146,11 @@ private:
   std::unique_ptr<JointMoveProfile> start_move_;
 
   msg::VrControllerFrame latest_frame_;
-  bool latest_frame_valid_ = false;
-  std::size_t frame_sequence_ = 0;
+  std::atomic<bool> latest_frame_valid_{false};
+  std::atomic<std::size_t> frame_sequence_{0};
+  /// Solver thread only: the last frame it solved for.
   std::size_t processed_sequence_ = 0;
-  double last_frame_time_ = 0.0;
+  std::atomic<double> last_frame_time_{0.0};
   double last_tick_ = steadySeconds();
 
   bool saw_grip_ = false;
@@ -954,6 +1167,25 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_service_;
   rclcpp_action::Client<GripperCommand>::SharedPtr gripper_client_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
+
+  // The solve runs on its own thread, so the two locks below are the whole
+  // shared-memory contract between it and the callbacks.
+  std::thread solve_thread_;
+  std::atomic<bool> running_{false};
+  /// Bumped on every transition in or out of following: it is how the solver
+  /// thread learns that the target it was working on belongs to a session that
+  /// has ended.
+  std::atomic<uint64_t> follow_generation_{0};
+  /// Solver thread only.
+  uint64_t solver_generation_ = 0;
+  /// Guards `measured_`, `latest_frame_` and the phase against the solver.
+  std::mutex state_mutex_;
+  /// Guards the single solution slot the solver writes and the timer reads.
+  std::mutex solution_mutex_;
+  /// Below this Jacobian minimum singular value the damped solver answers
+  /// instead of the configured one. Zero turns it off.
+  double damping_singular_value_ = 0.05;
   /// Keeps the run time mapping callback alive; dropping it unregisters it.
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_;
 };
@@ -975,7 +1207,14 @@ int main(int argc, char ** argv)
 
   auto node = std::make_shared<litearm_vr_teleop::VrTeleopNode>(options);
   node->initialize();
-  rclcpp::spin(node);
+
+  // Two threads so the node's callbacks can be in flight while the solver thread
+  // works. The callbacks themselves are all in one mutually exclusive group, so
+  // this buys concurrency with the solver and nothing else - which is the point:
+  // the timer must keep publishing while a solve is running.
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  executor.add_node(node);
+  executor.spin();
   rclcpp::shutdown();
   return 0;
 }

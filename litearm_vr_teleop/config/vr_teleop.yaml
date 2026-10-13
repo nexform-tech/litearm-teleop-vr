@@ -51,6 +51,14 @@ vr_teleop:
     #           MoveIt core's forward kinematics and Jacobian. Predictable
     #           latency, which is what a following task wants.
     ik_backend: plugin
+
+    # 当雅可比的最小奇异值低于这个数时，改用本包的阻尼最小二乘后端求解（0 = 关闭）。
+    #
+    # 插件后端（SNS）在奇异位形附近解不再是目标的连续函数：手的几毫米位移可以让某个
+    # 关节跳半弧度，往上往下概率相当 —— 操作员会发现某个方向"压不下去"。阻尼后端在同
+    # 一片区域里是连续的，代价是它接受的残差更大，所以每次切换都会打一条 WARN。
+    # 这里判定用的是"种子点"处的奇异值，与求解用的种子一致。
+    damping_singular_value: 0.05
     group_name: litearm_arm
     base_frame: base_link
     tip_link: ee_link
@@ -82,6 +90,24 @@ vr_teleop:
     low_pass_tau: 0.02
     moving_average_frames: 10
 
+    # The motion profile of the command stream: how fast a joint may move, how
+    # fast that speed may change, and how fast the change of speed may change.
+    #
+    # These exist because of what the firmware does with the velocity the
+    # controller writes - it is the slew ceiling of the position reference - so a
+    # command stream whose speed steps asks the firmware for a step in speed, and
+    # the field ends up pinned at its ceiling. Bounding the acceleration and then
+    # the jerk turns that stream into a curve the firmware can follow, at the cost
+    # of the arm taking a little longer to reach a new target: with the defaults,
+    # a rated 2 rad/s is reached in 0.1 s and full acceleration in 20 ms.
+    #
+    # The jerk ceiling is high on purpose: it softens the ends of a move, and a
+    # lower one also delays the deceleration, which makes the arm overshoot its
+    # target instead of approaching it. Tune max_joint_acceleration first; it is
+    # the number the operator feels. They are a starting point, not measurements.
+    max_joint_acceleration: 20.0
+    max_joint_jerk: 1000.0
+
     # What the hand's increment is measured against.
     #
     #   measured   the pose forward kinematics reports, so every frame starts
@@ -97,12 +123,25 @@ vr_teleop:
     #              experiences that as "I have to move my hand a long way before
     #              the arm does anything".
     #
-    # `commanded` is a decision to make after measuring on the hardware rather
-    # than before, so it ships off. With it on, the target can collect motion the
-    # arm cannot reach, which is what `max_target_lead_m` / `_rad` bound: beyond
-    # that lead the target is pulled back onto it, keeping the direction the
-    # operator asked for.
-    reference_pose: measured
+    # `commanded` is the default, and the reason is a measurement rather than a
+    # preference. In `measured` mode the target is rebuilt every frame from the
+    # pose the arm is actually in, and on this stack the arm's pose follows the
+    # command - so the residual of the inverse kinematics (a few tenths of a
+    # millimetre, which is ordinary for an iterative solver) is fed back into the
+    # next frame's target. That closes a loop with no damping in it: measured on
+    # the mock hardware with the operator's hand held still, every joint stood
+    # there oscillating peak to peak by 0.6 to 3.7 mrad, changing direction on
+    # nearly every frame, which is the sawtooth a position plot shows as a
+    # regular ripple. With the reference on the commanded pose the same
+    # measurement is 0.00000 rad on every joint: the target no longer contains
+    # the solver's residual, and the operator's own motion accumulates instead.
+    #
+    # The cost is the mirror image of the benefit: with it on, the target can
+    # collect motion the arm has not delivered yet. That is exactly what
+    # `max_target_lead_m` / `_rad` bound - beyond that lead the target is pulled
+    # back onto the arm, keeping the direction the operator asked for - and the
+    # grip release clears it. Use `measured` if the arm must never collect any.
+    reference_pose: commanded
     max_target_lead_m: 0.15
     max_target_lead_rad: 0.6
 

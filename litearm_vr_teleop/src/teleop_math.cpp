@@ -311,4 +311,132 @@ void JointTargetFilter::reset()
   seeded_ = false;
 }
 
+JointRateLimiter::JointRateLimiter(JointRateLimits limits, std::size_t dof)
+: limits_(limits), velocity_(Eigen::VectorXd::Zero(dof)), acceleration_(Eigen::VectorXd::Zero(dof)),
+  previous_target_(Eigen::VectorXd::Zero(dof))
+{
+  // A zero ceiling would freeze the arm and a zero time constant would divide by
+  // zero; both are configuration mistakes, and the limiter is on the command
+  // path, so they are repaired here rather than trusted.
+  limits_.max_velocity = std::abs(limits_.max_velocity);
+  limits_.max_acceleration = std::abs(limits_.max_acceleration);
+  limits_.max_jerk = std::abs(limits_.max_jerk);
+}
+
+Eigen::VectorXd JointRateLimiter::apply(
+  const Eigen::VectorXd & target, const Eigen::VectorXd & current, double dt)
+{
+  if (target.size() != current.size() || target.size() != velocity_.size()) {
+    // A target for a different number of joints is a caller bug. Holding the
+    // measurement is the only answer that cannot move the wrong joint.
+    return current;
+  }
+
+  const double safe_dt = std::min(0.05, std::max(1e-3, dt));
+  const Eigen::Index count = target.size();
+
+  // Where the target itself is going, per joint. A joint that is merely keeping
+  // up with a moving target is not closing on it and needs no room to stop, and
+  // separating the two is what lets a steadily moving target be tracked at its
+  // own speed with a small gap instead of that gap acting as a brake.
+  if (!seeded_ || previous_target_.size() != target.size()) {
+    previous_target_ = target;
+    seeded_ = true;
+  }
+  Eigen::VectorXd target_rate = (target - previous_target_) / safe_dt;
+  target_rate = target_rate.cwiseMax(-limits_.max_velocity).cwiseMin(limits_.max_velocity);
+  previous_target_ = target;
+
+  const double acceleration_step = limits_.max_jerk * safe_dt;
+  const Eigen::VectorXd remaining = target - current;
+
+  for (Eigen::Index i = 0; i < count; ++i) {
+    const double sign = remaining(i) >= 0.0 ? 1.0 : -1.0;
+    const double toward = std::abs(remaining(i));
+    const double velocity_toward = sign * velocity_(i);
+    // The gap is closed by two motions: the target coming towards the arm, which
+    // costs nothing to follow and needs no room to stop from, and the arm
+    // closing on it, which does.
+    const double rate_toward = std::max(0.0, sign * target_rate(i));
+
+    // The speed the arm should have: the target's own rate, plus as much closing
+    // speed as it can still be stopped from inside the distance left.
+    //
+    // The stopping law is the jerk aware one - v^2 / (2 a) for the stop, plus
+    // v a / (2 j) for the distance covered while the deceleration is built - and
+    // what is wanted is the speed the arm may hold while still being able to
+    // stop, not the speed it could stop from this instant. Those are different
+    // questions, and answering the second one is what makes a limiter brake too
+    // late: both the loop that follows the curve and the jerk ramp ahead of it
+    // are paid for out of the same distance, so the distance they need grows
+    // with the speed they allow. Substituting that margin into the law gives a
+    // quadratic in v, which is solved here rather than iterated:
+    //
+    //   v = 0.5 * ( -k + sqrt( k^2 + 8 a s ) ),  k = a^2 / j + 2 a m
+    //
+    // with `m` the time the loop and a full acceleration ramp take. The floor
+    // keeps the last fraction of a millimetre closing instead of being
+    // approached for ever.
+    const double stopping_law = limits_.max_acceleration * limits_.max_acceleration /
+      std::max(1e-9, limits_.max_jerk);
+    const double margin_seconds = 1.0 / speed_gain_ +
+      2.0 * limits_.max_acceleration / std::max(1e-9, limits_.max_jerk);
+    const double quadratic = stopping_law + 2.0 * limits_.max_acceleration * margin_seconds;
+    const double closing_limit = std::min(
+      limits_.max_velocity,
+      std::max(
+        0.01 * limits_.max_velocity,
+        0.5 * (-quadratic + std::sqrt(quadratic * quadratic +
+        8.0 * limits_.max_acceleration * toward))));
+    const double speed_limit = std::min(limits_.max_velocity, rate_toward + closing_limit);
+
+    // Chase that speed with a first order loop, then put the result through the
+    // two limits that make the command stream smooth: the speed may not change
+    // faster than max_acceleration, and the acceleration may not change faster
+    // than max_jerk. The second is what makes the speed curve an S rather than a
+    // ramp, so a joint starts and stops softly instead of asking the firmware
+    // for a step in speed.
+    const double wanted_toward = std::max(
+      -limits_.max_acceleration,
+      std::min(limits_.max_acceleration, speed_gain_ * (speed_limit - velocity_toward)));
+    // The speed limit is a distance, so it is worked out in the frame of the
+    // distance: "towards the target" is always the positive direction there. The
+    // acceleration has to be turned back into the joint's own frame before it is
+    // applied, or the limiter only ever moves one way - a joint whose target is
+    // below it would be told to accelerate upwards, the guard below would refuse
+    // the step, and the arm would sit still while every target on the other side
+    // of it was ignored.
+    const double wanted_acceleration = sign * wanted_toward;
+    acceleration_(i) = std::max(
+      acceleration_(i) - acceleration_step,
+      std::min(acceleration_(i) + acceleration_step, wanted_acceleration));
+    velocity_(i) = std::max(
+      -limits_.max_velocity, std::min(limits_.max_velocity, velocity_(i) + acceleration_(i) * safe_dt));
+  }
+
+  // The final guard: never step past the target, in either direction. The speed
+  // limit above starts the stop early enough that what this trims is a fraction
+  // of one cycle's step rather than a whole one - a limiter that is behind has
+  // to be able to stop where it is asked to, and one that overshoots turns into
+  // an oscillator around the target. The velocity state is left alone: forcing
+  // it to what the guard allowed would be a step in speed in its own right,
+  // which is the thing this class exists to remove.
+  Eigen::VectorXd step = velocity_ * safe_dt;
+  for (Eigen::Index i = 0; i < count; ++i) {
+    if (remaining(i) >= 0.0) {
+      step(i) = std::max(0.0, std::min(step(i), remaining(i)));
+    } else {
+      step(i) = std::min(0.0, std::max(step(i), remaining(i)));
+    }
+  }
+  return current + step;
+}
+
+void JointRateLimiter::reset()
+{
+  velocity_.setZero();
+  acceleration_.setZero();
+  seeded_ = false;
+}
+
 }  // namespace litearm_vr_teleop

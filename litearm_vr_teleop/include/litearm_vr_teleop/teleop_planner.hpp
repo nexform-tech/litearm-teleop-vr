@@ -125,6 +125,16 @@ public:
   Solution solve(
     const Eigen::Vector3d & position, const Eigen::Matrix3d & rotation, const Eigen::VectorXd & seed);
 
+  /// Solve with the damped backend whatever the configuration names.
+  ///
+  /// Used when the arm is near a singularity. The configured plugin's solution
+  /// jumps between configurations there - a few hundredths of a radian of hand
+  /// motion can move a joint by half a radian, and the arm is as likely to go up
+  /// as down - while a damped solve stays continuous through the same region, at
+  /// the cost of a residual it reports honestly.
+  Solution solveDamped(
+    const Eigen::Vector3d & position, const Eigen::Matrix3d & rotation, const Eigen::VectorXd & seed);
+
   /// Smallest singular value of the group Jacobian at `joints`.
   ///
   /// Reported so that a failing inverse kinematics call can be attributed to
