@@ -1,7 +1,17 @@
 # litearm_vr_moveit_config
 
-MoveIt 2 configuration for the merged "7-axis LiteArm + LiteGrip gripper" robot:
-URDF, SRDF, kinematics, joint limits, controller list and the RViz view.
+The description and solver configuration of the merged "7-axis LiteArm + LiteGrip
+gripper" robot.
+
+This package does no planning: no `move_group`, no OMPL pipeline, no controller
+list, no planning joint limits. What the teleoperation stack needs from it is a
+`robot_description`, a `robot_description_semantic` (the planning group is defined
+in it, and the command array's joint order is pinned to it), and the solver tuning
+the `plugin` backend reads. The `moveit_config` in the name is history: what is
+left are two files in MoveIt's formats - the SRDF and `config/kinematics.yaml` -
+while the URDF, the RViz view and the description-package detection are this
+package's own work. To plan with MoveIt, the arm's own `litearm_moveit_config` is
+the entrance; it carries the OMPL and controller configuration `move_group` needs.
 
 The reasoning behind every choice here - which hardware blocks the description
 emits, which values are duplicated and why, what the collision matrix keeps - is
