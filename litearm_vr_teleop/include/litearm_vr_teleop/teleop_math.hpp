@@ -25,31 +25,32 @@
 namespace litearm_vr_teleop
 {
 
-/// Which frame the controller's rotation increment is interpreted in.
+/// Which control logic the controller's rotation increment is read in.
 ///
-/// The two differ in what they hold fixed, and that decides what an operator
-/// sees when they turn their hand:
+/// The two differ in what they hold fixed, and that decides what an operator sees
+/// when they turn their hand. Each has its own calibration in
+/// `AxisMapping::rotation_signs`, because they read the same three numbers in
+/// different frames and a mirror that is right in one is wrong in the other.
 ///
-///   kWorld  the increment is the controller's rotation in the world, applied
-///           to the tool in the world. Turn the controller about a world axis
-///           and the tool turns about that same world axis, by the same angle,
-///           whatever pose the arm is in and however the controller is held.
-///   kTool   the increment is the controller's rotation in its own frame,
-///           applied to the tool in the tool's own frame, so the tool copies
-///           the hand axis for axis. That is only the same motion as kWorld
-///           while the tool's frame and the controller's frame stand in one
-///           specific relation to each other.
+///   kBaseLink  the increment is carried into the robot base frame and applied
+///              there. Turn the controller about a world axis and the tool turns
+///              about that same world axis, by the same angle, whatever pose the
+///              arm is in and however the controller is held.
+///   kTool      the increment is read in the controller's own frame and applied
+///              in the tool's own frame, so the tool copies the hand axis for
+///              axis. That is only the same motion as kBaseLink while the tool's
+///              frame and the controller's frame stand in one particular relation
+///              to each other.
 ///
-/// kWorld is the default because that relation is not a property of the
-/// installation, it is a property of the arm's pose. The measured baseline
-/// below was tuned with the wrist rolled so that the tool's own Y axis pointed
-/// straight down; at any other wrist roll the tool frame is rolled with respect
-/// to the world by the difference, and kTool hands the operator a response
-/// rotated by exactly that much. Under kWorld the same measured motion is
-/// reproduced exactly and a different wrist roll cannot change it.
+/// kBaseLink is the default because that relation is not a property of the
+/// installation, it is a property of the arm's pose. Any wrist roll other than the
+/// one the tool calibration was measured at rolls the tool frame with respect to
+/// the world by the difference, and kTool hands the operator a response rotated by
+/// exactly that much. Under kBaseLink the same measured motion is reproduced
+/// exactly and a different wrist roll cannot change it.
 enum class RotationMapping
 {
-  kWorld,
+  kBaseLink,
   kTool,
 };
 
@@ -63,9 +64,9 @@ enum class RotationMapping
 struct AxisMapping
 {
   /// Frame the controller's rotation increment is read in. See RotationMapping.
-  RotationMapping rotation_mode = RotationMapping::kWorld;
+  RotationMapping rotation_mode = RotationMapping::kBaseLink;
   /// Rotation correspondence between the controller's own frame and the tool's
-  /// own frame. Used by kTool only: kWorld needs no correspondence at all,
+  /// own frame. Used by kTool only: kBaseLink needs no correspondence at all,
   /// because the increment it applies is already expressed in the robot frame.
   Eigen::Matrix3d axis_remap = Eigen::Matrix3d::Identity();
   /// Frame correspondence between the WebXR controller frame and the robot base
@@ -75,27 +76,25 @@ struct AxisMapping
   ///
   /// It is one correspondence for both translation and rotation - the headset's
   /// reference frame is gravity aligned but yawed with respect to the robot -
-  /// so kWorld also uses it to carry the controller's attitude into the robot
+  /// so kBaseLink also uses it to carry the controller's attitude into the robot
   /// frame. It is per installation: it depends on which way the operator stands
   /// relative to the arm, which is why it cannot be shared with a rig that is
   /// laid out differently.
   Eigen::Matrix3d translation_remap = Eigen::Matrix3d::Identity();
-  /// Per axis sign applied to the rotation vector the mode produces, component
-  /// 0/1/2 being the frame that mode reads in: robot base axes for kWorld, tool
-  /// axes for kTool.
+  /// The selected control logic's own per axis sign, applied to the rotation
+  /// vector it produces, component 0/1/2 being the frame that logic reads in:
+  /// robot base axes for kBaseLink, tool axes for kTool.
   ///
-  /// A correction on top of the mode's own baseline, not a replacement for it:
-  /// kWorld's baseline is nothing (the geometry is already right), kTool's is
-  /// the measured `tool_rotation_signs` below. All ones therefore means "leave
-  /// this mode as measured", which is what makes switching modes at run time
-  /// give the other measured behaviour rather than a mode with a sign silently
-  /// missing.
+  /// Each logic carries its own, and they are independent by construction rather
+  /// than by convention: the mapping is what carries the hand's motion, and these
+  /// say which way each of its three directions points on this rig. The caller
+  /// puts the selected logic's vector here - the node reads both from its
+  /// parameter file and picks one - so a mirror that is right in one logic cannot
+  /// follow the operator into the other.
+  ///
+  /// The measured values are in `config/vr_teleop.yaml`, next to what was seen on
+  /// the rig when they were set.
   Eigen::Vector3d rotation_signs = Eigen::Vector3d::Ones();
-  /// The measured per axis signs of the tool frame mode, used by kTool only and
-  /// composed with the correction above. These are the reference's numbers:
-  /// they relate the controller's frame to the tool's at the one pose they were
-  /// measured at, which is why kTool is not the default. See RotationMapping.
-  Eigen::Vector3d tool_rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
 };
 
 /// Mapping for one upright arm driven by the right controller.

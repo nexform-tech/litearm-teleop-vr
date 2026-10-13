@@ -179,7 +179,6 @@ def bring_up(*, arm, gripper, dry_run, use_rviz, headset_port):
     share = get_package_share_directory(PACKAGE)
     moveit_share = get_package_share_directory("litearm_vr_moveit_config")
     teleop_params = os.path.join(share, "config", "vr_teleop.yaml")
-    tcp_params = os.path.join(share, "config", "tcp.yaml")
     controller_params = os.path.join(share, "config", "vr_controllers.yaml")
 
     hardware = hardware_arguments(dry_run, arm, gripper)
@@ -266,7 +265,7 @@ def bring_up(*, arm, gripper, dry_run, use_rviz, headset_port):
     # reads like a broken plan rather than like a missing parameter.
     actions.append(Node(
         package=PACKAGE, executable="vr_teleop_node", name="vr_teleop", output="screen",
-        parameters=[teleop_params, tcp_params,
+        parameters=[teleop_params,
                     {"robot_description": description,
                      "robot_description_semantic": semantic},
                     {"gripper_enabled": bool(gripper)}]))

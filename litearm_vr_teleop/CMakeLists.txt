@@ -272,6 +272,12 @@ if(BUILD_TESTING)
     APPEND_ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
   )
 
+  # The control logic's configuration: the switch, the two calibrations, and the
+  # retired keys whose silent loss this test exists to prevent.
+  ament_add_pytest_test(test_control_config test/test_control_config.py
+    APPEND_ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
+  )
+
   # The description-mesh check the launch runs: it must name the package a
   # description refers to and cannot reach, and must stay quiet when it can.
   ament_add_pytest_test(test_description_meshes test/test_description_meshes.py

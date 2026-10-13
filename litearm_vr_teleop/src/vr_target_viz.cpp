@@ -302,15 +302,16 @@ private:
     limits_.moving_average_samples = static_cast<std::size_t>(
       std::max(1, readParameter<int>("moving_average_samples", 10)));
 
-    // The same two mapping parameters as the teleoperation node, for the same
-    // reason as the average above: a viewer that drew a different mapping from
-    // the one the arm is being commanded with would send its user looking for
+    // The same control logic and its calibration as the teleoperation node, for
+    // the same reason as the average above: a viewer that drew a different mapping
+    // from the one the arm is being commanded with would send its user looking for
     // the difference in the arm.
-    mapping_.rotation_mode =
-      readParameter<std::string>("rotation_mode", "world") == "tool" ?
-      RotationMapping::kTool : RotationMapping::kWorld;
-    const std::vector<double> signs =
-      readParameter<std::vector<double>>("rotation_signs", std::vector<double>{1.0, 1.0, 1.0});
+    const bool tool_frame =
+      readParameter<std::string>("control_frame", "base_link") == "tool";
+    mapping_.rotation_mode = tool_frame ? RotationMapping::kTool : RotationMapping::kBaseLink;
+    const std::vector<double> signs = readParameter<std::vector<double>>(
+      tool_frame ? "tool_rotation_signs" : "base_link_rotation_signs",
+      tool_frame ? std::vector<double>{1.0, -1.0, -1.0} : std::vector<double>{-1.0, -1.0, 1.0});
     if (signs.size() == 3u) {
       mapping_.rotation_signs = Eigen::Vector3d(signs[0], signs[1], signs[2]);
     }

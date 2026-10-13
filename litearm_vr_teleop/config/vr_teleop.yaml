@@ -218,61 +218,69 @@ vr_teleop:
     target_deadband_m: 0.0
     target_deadband_rad: 0.0
 
-    # How the controller's rotation reaches the tool.
+    # Which control logic the hand's motion is read in. Two of them, and this key
+    # is the only thing that changes between them; each carries its own rotation
+    # calibration below, because the two read the same three numbers in different
+    # frames and a mirror that is right in one is wrong in the other.
     #
-    #   world  the tool turns about the same world axis the controller turned
-    #          about, by the same angle. This is what "the gripper follows my
-    #          hand" means to an operator, and it holds at every arm pose.
-    #   tool   the tool copies the hand axis for axis, in the tool's own frame.
-    #          This is the previous behaviour. It is the same motion as `world`
-    #          only while the tool's frame and the controller's frame stand in
-    #          one particular relation - which the measured baseline below was
-    #          taken at, and which any other wrist roll breaks. At the start
-    #          pose, whose wrist roll is about 95 degrees from that one, an
-    #          operator turning the controller saw the arm answer in a rotated
-    #          direction.
+    #   base_link  the controller's rotation increment is carried into the robot
+    #              base frame and applied there, so the tool turns about the same
+    #              world axis the controller turned about, by the same angle,
+    #              whatever pose the arm is in and however the controller is held.
+    #              This is the default, and the one this rig is calibrated for.
+    #   tool       the increment is read in the controller's own frame and applied
+    #              in the tool's own frame, so the tool copies the hand axis for
+    #              axis. That is the same motion only while the tool's frame and
+    #              the controller's frame stand in one particular relation - the
+    #              pose the tool calibration below was measured at - and any other
+    #              wrist roll hands the operator a response rotated by the
+    #              difference.
     #
-    # `world` needs no calibration and is the default. `tool` is kept because a
-    # rig that was calibrated for it can ask for it back.
-    rotation_mode: world
+    # Live, like the calibrations: the person who can tell whether a direction is
+    # right is the one holding the controller, so either can be changed while the
+    # node runs and the change takes effect on the next headset frame (until then
+    # the arm holds the pose it had):
+    #
+    #   ros2 param set /vr_teleop control_frame tool
+    #   ros2 param set /vr_teleop base_link_rotation_signs "[-1.0, -1.0, 1.0]"
+    control_frame: base_link
 
-    # Per axis sign on the rotation increment, applied on top of the mode's own
-    # baseline: nothing in `world` (the geometry is already right), the measured
-    # [1, -1, -1] in `tool`. All ones therefore means "leave this mode as
-    # measured", which is what makes switching modes live give the other
-    # measured behaviour rather than a mode with a sign missing.
+    # Per axis sign applied to the rotation vector, in the frame the selected
+    # control logic reads in: robot base axes for base_link, tool axes for tool.
     #
-    # The signs are applied in the frame the mode reads in: robot base axes for
-    # `world`, tool axes for `tool`. They exist for what geometry cannot fix: a
-    # headset frame that is mirrored, or a controller habitually held upside
-    # down.
+    # Each is that logic's own calibration and nothing else - the mapping carries
+    # the hand's motion, these say which way each of its three directions points on
+    # this rig - so they are independent by construction rather than by convention.
     #
-    # Both parameters are live. The person who can tell whether a sign is right
-    # is the one holding the controller, so they can be changed without
-    # restarting anything, and the change takes effect on the next frame:
+    # base_link, measured here: raising the controller tilted the tool down and
+    # lowering it tilted the tool up, and leaning the controller left and right
+    # tilted it the other way as well, so the rotations about the robot's x (the
+    # operator's left-right axis) and y (their forward axis) are mirrored. The two
+    # that are mirrored and the one that is not are worth naming: diag(-1,-1,1) is
+    # a half turn about z, not a mirror, which is what an operator standing on the
+    # far side of the arm from where the baseline was measured sees. So the
+    # TRANSLATION has to be checked too, because the same correspondence carries it
+    # (singleArmUprightMapping in teleop_math.cpp): if pushing the controller
+    # forward moves the tool backward, the correspondence is the thing to fix and
+    # these two signs must come back to 1.0 - correcting both corrects twice.
     #
-    #   ros2 param set /vr_teleop rotation_signs "[1.0, 1.0, -1.0]"
-    #   ros2 param set /vr_teleop rotation_mode tool
+    # tool, the reference implementation's measured baseline: the controller's
+    # axes read as the tool's, which is the previous behaviour this key restores.
+    base_link_rotation_signs: [-1.0, -1.0, 1.0]
+    tool_rotation_signs: [1.0, -1.0, -1.0]
+
+    # The point of the tool the operator commands, as an offset from the planning
+    # tip link (tip_link, ee_link) in the tip frame, in metres. The headset commands
+    # a tool centre point, not the flange; 0.18 m is this gripper's
+    # flange-to-grasp-point distance, and 0.0 teleoperates the flange itself.
     #
-    # A change takes effect on the next headset frame; until then the arm holds
-    # the pose it had.
-    #
-    # Measured on this rig: raising the controller tilted the tool down, lowering
-    # it tilted the tool up, and leaning the controller left and right tilted the
-    # tool the other way as well. Two components are mirrored here, and the two
-    # that are mean something: with the operator facing +y, the first is the
-    # rotation about the robot's x - the left-right axis a hand raised and lowered
-    # turns about - and the second is the rotation about its y, the forward axis a
-    # hand leaning sideways turns about. Mirroring both and leaving z alone is a
-    # half turn about z, which is what an operator standing on the far side of the
-    # arm from where the baseline was measured would see.
-    #
-    # That also means the TRANSLATION has to be checked, because the same frame
-    # correspondence carries it (singleArmUprightMapping in teleop_math.cpp): if
-    # pushing the controller forward moves the tool backward, or right moves it
-    # left, then the correspondence is the thing to fix and these two signs must
-    # come back to 1.0 - correcting both would be correcting twice.
-    rotation_signs: [-1.0, -1.0, 1.0]
+    # It is applied on both sides of the increment mapping, which is what makes it a
+    # frame rather than a fudge factor: the measured tip pose is moved to the TCP
+    # before the hand's increment is applied, so the anchor is the TCP the operator
+    # sees, and the resulting target is moved back to the tip pose before the
+    # inverse kinematics, because that is the frame the solver plans for. Changing
+    # it changes which point of the tool follows the hand, not the gain.
+    tcp_offset: [0.0, 0.0, 0.18]
 
     # Freeze when the headset goes quiet. Deliberately much shorter than the
     # controller's own staleness timeout: this node knows more than the controller

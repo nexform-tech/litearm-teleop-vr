@@ -101,7 +101,7 @@ AxisMapping singleArmUprightMapping()
   // correspondence is involved and none may be added: this mode is what makes
   // the response independent of the arm's pose and of how the controller is
   // held. See RotationMapping in the header for why that matters here.
-  mapping.rotation_mode = RotationMapping::kWorld;
+  mapping.rotation_mode = RotationMapping::kBaseLink;
 
   // Kept for kTool, which is the previous behaviour: the tool copies the
   // controller axis for axis. Identity here because the frames agree in axis
@@ -122,17 +122,13 @@ AxisMapping singleArmUprightMapping()
     0.0, 0.0, 1.0,
     0.0, -1.0, 0.0;
 
-  // No correction. kWorld is geometric: the increment it applies is measured in
-  // the robot frame and applied to the tool in the robot frame, so there is
-  // nothing left to flip. The signs stay available because a rig whose headset
-  // frame is mirrored, or a controller held upside down out of habit, is not a
-  // geometry error and cannot be fixed by geometry.
+  // No correction here. kBaseLink is geometric: the increment it applies is
+  // measured in the robot frame and applied to the tool in the robot frame, so
+  // there is nothing left to flip. The signs stay available, and are the node's to
+  // supply, because a rig whose headset frame is mirrored, or a controller held
+  // upside down out of habit, is not a geometry error and cannot be fixed by
+  // geometry - and because the two logics need different ones.
   mapping.rotation_signs = Eigen::Vector3d::Ones();
-
-  // What kTool adds on top: the reference's measured per axis signs, kept so
-  // that asking for the previous behaviour gets the measured one and not a
-  // tool frame mode with its signs left out.
-  mapping.tool_rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
 
   return mapping;
 }
@@ -239,7 +235,7 @@ Eigen::Matrix<double, 6, 1> TeleopIncrementMapper::relativeMotion(
   const Eigen::Matrix3d controller_to_robot = mapping_.translation_remap.transpose();
 
   Eigen::Matrix3d relative_rotation;
-  if (mapping_.rotation_mode == RotationMapping::kWorld) {
+  if (mapping_.rotation_mode == RotationMapping::kBaseLink) {
     // The controller's rotation in the robot frame: take the rotation it had,
     // carry it across, and conjugate the body frame increment by it. Written
     // per frame rather than as a fixed matrix because the frame it is measured
@@ -285,21 +281,18 @@ CartesianTarget TeleopIncrementMapper::feed(
   averaged /= static_cast<double>(history_.size());
 
   const Eigen::Vector3d relative_position = averaged.head<3>();
-  const Eigen::Vector3d signs =
-    mapping_.rotation_mode == RotationMapping::kTool ?
-    mapping_.tool_rotation_signs.cwiseProduct(mapping_.rotation_signs) :
-    mapping_.rotation_signs;
+  const Eigen::Vector3d & signs = mapping_.rotation_signs;
   const Eigen::Vector3d relative_rotation_vector = averaged.tail<3>().cwiseProduct(signs);
 
   target.position = ee_position + relative_position;
-  // Left multiplication under kWorld, right multiplication under kTool, and the
+  // Left multiplication under kBaseLink, right multiplication under kTool, and the
   // difference is the whole point of the two modes: rotating the measured pose
   // in the robot frame is a motion in the world, rotating it in the tool frame
-  // is a motion about the tool's own axes. Under kWorld the tool therefore turns
+  // is a motion about the tool's own axes. Under kBaseLink the tool therefore turns
   // about the same world axis as the controller whatever pose the arm is in;
   // under kTool it copies the hand axis for axis, which is the same motion only
   // at the one arm pose the signs were measured at.
-  if (mapping_.rotation_mode == RotationMapping::kWorld) {
+  if (mapping_.rotation_mode == RotationMapping::kBaseLink) {
     target.rotation = rotationVectorToMatrix(relative_rotation_vector) * ee_rotation;
   } else {
     target.rotation = ee_rotation * rotationVectorToMatrix(relative_rotation_vector);
@@ -349,10 +342,7 @@ CartesianTwist TeleopIncrementMapper::feedRate(
   }
   const Eigen::Matrix<double, 6, 1> rate = travelled / elapsed;
 
-  const Eigen::Vector3d signs =
-    mapping_.rotation_mode == RotationMapping::kTool ?
-    mapping_.tool_rotation_signs.cwiseProduct(mapping_.rotation_signs) :
-    mapping_.rotation_signs;
+  const Eigen::Vector3d & signs = mapping_.rotation_signs;
 
   twist.linear = rate.head<3>();
   twist.angular = rate.tail<3>().cwiseProduct(signs);

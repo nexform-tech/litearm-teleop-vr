@@ -265,10 +265,12 @@ public:
       "pull the trigger to close the gripper");
     RCLCPP_INFO(
       get_logger(),
-      "controller rotation is read in the %s frame, signs [%.2f %.2f %.2f]; "
-      "'ros2 param set /vr_teleop rotation_mode tool' and 'ros2 param set /vr_teleop "
-      "rotation_signs [a, b, c]' change it while this node runs",
-      rotation_mode_name_.c_str(), rotation_signs_.x(), rotation_signs_.y(), rotation_signs_.z());
+      "control logic '%s': signs [%.2f %.2f %.2f] (base_link [%.2f %.2f %.2f], tool [%.2f %.2f "
+      "%.2f]); 'ros2 param set /vr_teleop control_frame tool' and 'ros2 param set /vr_teleop "
+      "base_link_rotation_signs [a, b, c]' change them while this node runs",
+      control_frame_name_.c_str(), selectedSigns().x(), selectedSigns().y(), selectedSigns().z(),
+      base_link_rotation_signs_.x(), base_link_rotation_signs_.y(), base_link_rotation_signs_.z(),
+      tool_rotation_signs_.x(), tool_rotation_signs_.y(), tool_rotation_signs_.z());
     if (follow_mode_ == FollowMode::kVelocity) {
       RCLCPP_INFO(
         get_logger(),
@@ -324,7 +326,7 @@ private:
     start_pose_accel_ = readParameter<double>("start_pose_accel", kStartPoseAccel);
 
     // The point of the tool that follows the hand, as an offset from tip_link in
-    // the tip frame (config/tcp.yaml). Defaults to the current gripper's
+    // the tip frame (config/vr_teleop.yaml). Defaults to the current gripper's
     // flange-to-grasp-point distance.
     const std::vector<double> tcp_offset =
       readParameter<std::vector<double>>("tcp_offset", std::vector<double>{0.0, 0.0, 0.18});
@@ -418,28 +420,22 @@ private:
     // turns the guard off.
     damping_singular_value_ = readParameter<double>("damping_singular_value", 0.05);
 
-    // How the controller's rotation reaches the tool. `world` is the geometric
-    // default: the tool turns about the same world axis as the controller,
-    // whatever pose the arm is in. `tool` is the previous behaviour, kept
-    // because a rig that was calibrated for it can ask for it back.
-    rotation_mode_name_ = readParameter<std::string>("rotation_mode", "world");
-    if (rotation_mode_name_ != "world" && rotation_mode_name_ != "tool") {
+    // Which control logic the hand's rotation is read in, and that logic's own
+    // calibration. `base_link` carries the increment into the robot base frame and
+    // applies it there; `tool` reads it in the controller's own frame and applies it
+    // in the tool's. The two read the same three numbers in different frames, which
+    // is why each has its own signs rather than sharing one. See
+    // config/vr_teleop.yaml for the measured values and what was seen on the rig.
+    control_frame_name_ = readParameter<std::string>("control_frame", "base_link");
+    if (control_frame_name_ != "base_link" && control_frame_name_ != "tool") {
       RCLCPP_WARN(
-        get_logger(), "rotation_mode '%s' is not a mode; using 'world'",
-        rotation_mode_name_.c_str());
-      rotation_mode_name_ = "world";
+        get_logger(), "control_frame '%s' is not a control logic; using 'base_link'",
+        control_frame_name_.c_str());
+      control_frame_name_ = "base_link";
     }
-    const std::vector<double> default_signs{1.0, 1.0, 1.0};
-    const std::vector<double> rotation_signs =
-      readParameter<std::vector<double>>("rotation_signs", default_signs);
-    if (rotation_signs.size() != 3u) {
-      RCLCPP_WARN(
-        get_logger(), "rotation_signs needs three numbers, got %zu; using [1 1 1]",
-        rotation_signs.size());
-      rotation_signs_ = Eigen::Vector3d::Ones();
-    } else {
-      rotation_signs_ = Eigen::Vector3d(rotation_signs[0], rotation_signs[1], rotation_signs[2]);
-    }
+    base_link_rotation_signs_ =
+      readSigns("base_link_rotation_signs", std::vector<double>{-1.0, -1.0, 1.0});
+    tool_rotation_signs_ = readSigns("tool_rotation_signs", std::vector<double>{1.0, -1.0, -1.0});
 
     // What the increment mapping measures against, and how far the target may
     // run ahead of the arm. See config/vr_teleop.yaml for what each mode is for;
@@ -491,6 +487,29 @@ private:
     start_pose_ = Eigen::VectorXd::Map(start_pose.data(), start_pose.size());
   }
 
+  /// Read one control logic's three number calibration.
+  ///
+  /// A sign vector that is not three numbers is a configuration mistake that would
+  /// otherwise reach the mapping as a short or padded vector, so it is refused here
+  /// with the fallback named in the message rather than silently reshaped.
+  Eigen::Vector3d readSigns(const std::string & name, const std::vector<double> & fallback)
+  {
+    const std::vector<double> values = readParameter<std::vector<double>>(name, fallback);
+    if (values.size() != 3u) {
+      RCLCPP_WARN(
+        get_logger(), "%s needs three numbers, got %zu; using [%.0f %.0f %.0f]", name.c_str(),
+        values.size(), fallback[0], fallback[1], fallback[2]);
+      return Eigen::Vector3d(fallback[0], fallback[1], fallback[2]);
+    }
+    return Eigen::Vector3d(values[0], values[1], values[2]);
+  }
+
+  /// The calibration the selected control logic reads in.
+  Eigen::Vector3d selectedSigns() const
+  {
+    return control_frame_name_ == "tool" ? tool_rotation_signs_ : base_link_rotation_signs_;
+  }
+
   /// The mapping the parameters describe, on top of the measured baseline.
   ///
   /// The baseline carries the frame correspondence, which is a property of where
@@ -502,8 +521,10 @@ private:
   {
     AxisMapping mapping = singleArmUprightMapping();
     mapping.rotation_mode =
-      rotation_mode_name_ == "tool" ? RotationMapping::kTool : RotationMapping::kWorld;
-    mapping.rotation_signs = rotation_signs_;
+      control_frame_name_ == "tool" ? RotationMapping::kTool : RotationMapping::kBaseLink;
+    // The selected logic's own calibration, and nothing else: the two read the same
+    // three numbers in different frames, which is why there are two of them.
+    mapping.rotation_signs = selectedSigns();
     return mapping;
   }
 
@@ -518,28 +539,35 @@ private:
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
 
-    std::string mode = rotation_mode_name_;
-    Eigen::Vector3d signs = rotation_signs_;
+    std::string mode = control_frame_name_;
+    Eigen::Vector3d base_link_signs = base_link_rotation_signs_;
+    Eigen::Vector3d tool_signs = tool_rotation_signs_;
     bool mapping_changed = false;
 
     for (const rclcpp::Parameter & parameter : parameters) {
-      if (parameter.get_name() == "rotation_mode") {
+      const std::string & name = parameter.get_name();
+      if (name == "control_frame") {
         const std::string requested = parameter.as_string();
-        if (requested != "world" && requested != "tool") {
+        if (requested != "base_link" && requested != "tool") {
           result.successful = false;
-          result.reason = "rotation_mode must be 'world' or 'tool', not '" + requested + "'";
+          result.reason = "control_frame must be 'base_link' or 'tool', not '" + requested + "'";
           return result;
         }
         mode = requested;
         mapping_changed = true;
-      } else if (parameter.get_name() == "rotation_signs") {
+      } else if (name == "base_link_rotation_signs" || name == "tool_rotation_signs") {
         const std::vector<double> requested = parameter.as_double_array();
         if (requested.size() != 3u) {
           result.successful = false;
-          result.reason = "rotation_signs needs three numbers";
+          result.reason = name + " needs three numbers";
           return result;
         }
-        signs = Eigen::Vector3d(requested[0], requested[1], requested[2]);
+        const Eigen::Vector3d signs(requested[0], requested[1], requested[2]);
+        if (name == "base_link_rotation_signs") {
+          base_link_signs = signs;
+        } else {
+          tool_signs = signs;
+        }
         mapping_changed = true;
       }
     }
@@ -548,16 +576,17 @@ private:
       return result;
     }
 
-    rotation_mode_name_ = mode;
-    rotation_signs_ = signs;
+    control_frame_name_ = mode;
+    base_link_rotation_signs_ = base_link_signs;
+    tool_rotation_signs_ = tool_signs;
     if (mapper_ != nullptr) {
       mapper_->setMapping(buildAxisMapping());
     }
     RCLCPP_WARN(
       get_logger(),
-      "rotation mapping changed to mode '%s' signs [%.2f %.2f %.2f]; it applies from the next "
-      "headset frame, and the arm holds its target until then",
-      rotation_mode_name_.c_str(), rotation_signs_.x(), rotation_signs_.y(), rotation_signs_.z());
+      "control logic changed to '%s' signs [%.2f %.2f %.2f]; it applies from the next headset "
+      "frame, and the arm holds its target until then",
+      control_frame_name_.c_str(), selectedSigns().x(), selectedSigns().y(), selectedSigns().z());
     return result;
   }
 
@@ -1375,8 +1404,11 @@ private:
   TeleopLimits teleop_limits_;
   /// Frame the controller's rotation increment is read in, and the per axis
   /// signs applied to it. Both are settable at run time; see onParameterUpdate.
-  std::string rotation_mode_name_ = "world";
-  Eigen::Vector3d rotation_signs_ = Eigen::Vector3d::Ones();
+  std::string control_frame_name_ = "base_link";
+  /// One calibration per control logic. See config/vr_teleop.yaml for the measured
+  /// values and what was seen on the rig when they were set.
+  Eigen::Vector3d base_link_rotation_signs_ = Eigen::Vector3d(-1.0, -1.0, 1.0);
+  Eigen::Vector3d tool_rotation_signs_ = Eigen::Vector3d(1.0, -1.0, -1.0);
   double headset_timeout_s_ = 0.5;
   bool gripper_enabled_ = true;
   std::string gripper_action_;
@@ -1406,7 +1438,7 @@ private:
   Eigen::VectorXd measured_;
   std::atomic<bool> have_measured_{false};
   CartesianTarget cartesian_target_;
-  /// tip_link -> TCP, in the tip frame (config/tcp.yaml).
+  /// tip_link -> TCP, in the tip frame (config/vr_teleop.yaml).
   Eigen::Vector3d tcp_offset_ = Eigen::Vector3d(0.0, 0.0, 0.18);
   bool have_cartesian_target_ = false;
   /// The last joint solution, and whether there is one. Held between headset

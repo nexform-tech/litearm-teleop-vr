@@ -81,7 +81,7 @@ TEST(TeleopMath, UprightMappingMatchesTheMeasuredBaseline)
 
   // The geometric mode, with no correction: it needs none, because the
   // increment it applies is measured and applied in the robot frame.
-  EXPECT_EQ(mapping.rotation_mode, RotationMapping::kWorld);
+  EXPECT_EQ(mapping.rotation_mode, RotationMapping::kBaseLink);
   EXPECT_TRUE(mapping.rotation_signs.isApprox(Eigen::Vector3d::Ones()));
 
   // Kept for the tool frame mode, which is the previous behaviour.
@@ -157,6 +157,9 @@ TEST(TeleopMath, WorldModeResponseDoesNotDependOnTheArmPose)
 
     AxisMapping tool_mapping = singleArmUprightMapping();
     tool_mapping.rotation_mode = RotationMapping::kTool;
+    // The tool logic's own calibration, which the configuration carries: the two
+    // logics read the same three numbers in different frames.
+    tool_mapping.rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
     TeleopIncrementMapper tool_mapper(tool_mapping, testLimits());
     tool_mapper.start(controller, Eigen::Quaterniond::Identity());
     const Eigen::Matrix3d tool_increment =
@@ -204,6 +207,7 @@ TEST(TeleopMath, BothModesAgreeAtTheAttitudeTheBaselineWasMeasuredAt)
 
   AxisMapping tool_mapping = singleArmUprightMapping();
   tool_mapping.rotation_mode = RotationMapping::kTool;
+  tool_mapping.rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
   TeleopIncrementMapper tool_mapper(tool_mapping, testLimits());
   tool_mapper.start(controller, controller_orientation);
   const CartesianTarget tool_target =
@@ -431,11 +435,12 @@ TEST(TeleopMath, SignsApplyToTheFrameTheModeReadsIn)
   const Eigen::Vector3d controller(0.0, 1.0, 0.0);
   const Eigen::Quaterniond turned(Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitY()));
 
-  // Tool frame mode: the signs act on the tool's own axes, which is what the
-  // measured baseline's [1 -1 -1] were. A controller turn about its Y comes out
-  // as a tool turn about the tool's -Y.
+  // Tool logic: its signs act on the tool's own axes, which is what its measured
+  // calibration's [1 -1 -1] are. A controller turn about its Y comes out as a tool
+  // turn about the tool's -Y.
   AxisMapping tool_mapping = singleArmUprightMapping();
   tool_mapping.rotation_mode = RotationMapping::kTool;
+  tool_mapping.rotation_signs = Eigen::Vector3d(1.0, -1.0, -1.0);
   TeleopIncrementMapper tool_mapper(tool_mapping, testLimits());
   tool_mapper.start(controller, Eigen::Quaterniond::Identity());
   const CartesianTarget tool_target =
@@ -444,7 +449,7 @@ TEST(TeleopMath, SignsApplyToTheFrameTheModeReadsIn)
   EXPECT_NEAR(tool_applied.angle(), 0.1, 1e-6);
   EXPECT_NEAR(tool_applied.axis().y(), -1.0, 1e-6);
 
-  // World frame mode: the signs act on the robot's axes. The baseline carries
+  // Base-link logic: the signs act on the robot's axes. The baseline carries
   // the controller's Y to robot +Z, so the Z sign is the one that flips this
   // motion; giving Y the minus instead would leave it alone.
   AxisMapping world_mapping = singleArmUprightMapping();
