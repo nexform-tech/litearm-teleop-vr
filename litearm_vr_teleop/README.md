@@ -85,48 +85,61 @@ and everything that cannot is Python.
 
 ### How the controller's rotation reaches the tool
 
-Two frames are available, chosen by `rotation_mode` in `config/vr_teleop.yaml`,
-and the difference is what an operator sees when they turn their hand:
+Two control logics are available, chosen by `control_frame` in
+`config/vr_teleop.yaml`, and the difference is what an operator sees when they
+turn their hand:
 
-- **`world` (default)** — the tool turns about the same world axis the controller
+- **`base_link` (default)** - the increment is carried into the robot base frame
+  and applied there, so the tool turns about the same world axis the controller
   turned about, by the same angle. If the operator rolls the controller, the tool
   rolls with it; if they swing its nose, the tool's nose swings the same way in
-  the room. This is independent of the arm's pose and of how the controller is
-  held.
-- **`tool`** — the tool copies the controller axis for axis in its own frame. This
-  is only the same motion while the tool's frame and the controller's frame stand
-  in one particular relation to each other.
+  the room. Independent of the arm's pose and of how the controller is held.
+- **`tool`** - the increment is read in the controller's own frame and applied in
+  the tool's own frame, so the tool copies the hand axis for axis. That is the
+  same motion only while the tool's frame and the controller's frame stand in one
+  particular relation to each other - the one its calibration was measured at.
 
-`world` is the default because that relation is a property of the arm's pose, not
-of the rig. The reference's per axis signs were measured with the wrist rolled so
-that the tool's own Y axis pointed straight down; at any other wrist roll the tool
-frame is rolled with respect to the world by the difference, and the tool mode
+`base_link` is the default because that relation is a property of the arm's pose,
+not of the rig. The tool logic's signs were measured with the wrist rolled so that
+the tool's own Y axis pointed straight down; at any other wrist roll the tool
+frame is rolled with respect to the world by the difference, and the tool logic
 answers a hand rotation with a motion rotated by exactly that much. At the
 teleoperation start pose the wrist roll is about 95 degrees away from the pose
 those signs were measured at, which is a rotation the operator feels immediately.
-Both modes agree exactly at the measured pose, so `world` reproduces the measured
-motion where it was measured and keeps it everywhere else.
+Both logics agree exactly at the measured pose, so `base_link` reproduces the
+measured motion where it was measured and keeps it everywhere else.
 
-The frame correspondence (the headset's reference frame is gravity aligned but
-yawed with respect to the robot) stays a measured constant; it is per
-installation, because it depends on which way the operator stands. The two
-parameters above it are live, because the person who can tell whether a sign is
-right is the one holding the controller:
+Each logic carries **its own calibration**, because the two read the same three
+numbers in different frames and a mirror that is right in one is wrong in the
+other:
+
+| parameter | logic | the frame the three numbers are read in |
+| --- | --- | --- |
+| `base_link_rotation_signs` | `base_link` | the robot base axes (x right, y forward, z up) |
+| `tool_rotation_signs` | `tool` | the tool's own axes |
+
+They are this rig's measurements, and the parameter file says what was seen when
+they were set. The frame correspondence underneath them (the headset's reference
+frame is gravity aligned but yawed with respect to the robot) is a measured
+constant as well; it is per installation, because it depends on which way the
+operator stands. All three keys are live, because the person who can tell whether
+a direction is right is the one holding the controller:
 
 ```bash
-ros2 param set /vr_teleop rotation_signs "[1.0, 1.0, -1.0]"
-ros2 param set /vr_teleop rotation_mode tool
+ros2 param set /vr_teleop control_frame tool
+ros2 param set /vr_teleop base_link_rotation_signs "[-1.0, -1.0, 1.0]"
 ```
 
-`rotation_signs` is `[1, 1, 1]` by default, which means "leave this mode as
-measured": it is a correction applied on top of the mode's own baseline - nothing
-for `world`, the reference's measured `[1, -1, -1]` for `tool`. That is what makes
-switching modes live give the other *measured* behaviour rather than a tool frame
-mode with its signs left out. A correction applies per axis in the frame the mode
-reads in - robot axes for `world`, tool axes for `tool` - and exists for the cases
-geometry cannot fix: a mirrored headset frame, or a controller held upside down
-out of habit. A change takes effect on the next headset frame, and the arm holds
-its pose until then.
+A change takes effect on the next headset frame, and the arm holds its pose until
+then. The startup log prints which logic is running and both calibrations, so a
+session can be asked rather than remembered.
+
+**Which logic is which, when they look the same.** At the attitude the tool
+calibration was measured at they *are* the same, and so is any motion whose axis
+happens to line up with the tool's own axes. Away from that attitude they differ:
+turning the controller about the world vertical sweeps the tool's pointing
+direction under `base_link`, and mostly rolls the tool about its own long axis
+under `tool`.
 
 ### Jitter, and where the command stream's numbers come from
 
@@ -377,97 +390,60 @@ Nothing is lost at either rate: the mapper measures the hand's motion since the
 last time it was fed, so a target advanced less often carries all of the motion in
 between, and in `commanded` reference mode the arm delivers it as soon as it can.
 
-## Two launches
+## Three launches
+
+One entry point per bench, and one switch: `dry_run` says whether this run drives
+hardware or simulates it.
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock hardware
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # fake firmware, real protocol
+ros2 launch litearm_vr_teleop teleop_arm.launch.py            # the arm
+ros2 launch litearm_vr_teleop teleop_gripper.launch.py        # the gripper, arm simulated
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py    # both
+
+# the hardware drivers instead of simulation, for whichever one is running
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py dry_run:=false
 ```
 
-Both start the same controllers and the same nodes. The difference is the last
-centimetre, and it decides what the run can tell you.
-
-### The gripper, and which launch can move it
-
-The gripper's hardware is configured through xacro arguments, and they are launch
-arguments here, so the bench decides what is attached. Two of them differ in what
-they block, and both have to be opened to move a real gripper:
-
-| argument | default | what it blocks |
+| launch | controls | what `dry_run:=false` drives |
 | --- | --- | --- |
-| `litegrip_dry_run` | `true` | touching the hardware at all - the component drives a simulated plant instead of can0 |
-| `litegrip_hardware_enable` | `false` | the motor gate: "is a gripper actually attached" |
-| `litegrip_channel` / `_can_id` / `_mst_id` | `can0` / `8` / `24` | which bus and addresses the gripper answers on |
-| `litegrip_max_feedback_velocity_rad_s` | `1.5` | the component sends no motion frame without a positive bound; the xacro's own default is a fail-closed negative |
+| `teleop_arm` | the arm; the gripper's component stays simulated | the arm's direct-USB component, motors enabled at configure |
+| `teleop_gripper` | the gripper; the arm stays simulated | the gripper's component, with its motor gate opened |
+| `teleop_arm_gripper` | both | both |
 
-```bash
-# a real gripper, with the arm faked by the daemon's dry run (the usual bench)
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml \
-    litegrip_dry_run:=false litegrip_hardware_enable:=true
+`dry_run` is the only mode argument, and it defaults to true, so a launch file run
+by accident moves nothing. A launch that does not control a device still simulates
+it, and that is not tidiness: a component left real with nothing commanding it is a
+motor being held, and the arm launch has no business opening the gripper's gate.
+The gripper launch simulates the arm for the opposite reason - the teleoperation
+node needs a joint state to hold and to plan from, and with no arm on the bench the
+simulated one is what provides it.
 
-# a real gripper and a real arm
-ros2 launch litearm_vr_teleop teleop_stack.launch.xml use_mock_hardware:=false \
-    litegrip_dry_run:=false litegrip_hardware_enable:=true
-```
+`use_rviz` and `headset_port` are the only other arguments. Everything a number
+can tune lives in `config/vr_teleop.yaml`; the TCP offset used to be its own file
+and is now one of them.
 
-**`teleop_virtual.launch.xml` cannot drive a real gripper, at any setting**, which
-is why it offers none of these arguments: its mock hardware is one component
-covering the arm *and* the gripper, so the gripper's hardware is simulated along
-with the arm's. The check to keep in mind in both directions is the component's
-own line in the log:
+The description is one robot either way, so what decides the hardware inside it is
+still the xacro arguments `use_mock_hardware` and `litegrip_dry_run` /
+`litegrip_hardware_enable`. The launches set those from `dry_run`; nothing else
+does.
+
+Three lines from the log are worth knowing, because each one is the difference
+between a run that works and a run that only looks like it does:
 
 ```text
+description meshes: all packages resolve (litearm_description x18, litegrip_description x6)
+control logic 'base_link': signs [-1.00 -1.00 1.00] (base_link [...], tool [...])
 [LitegripSystem] gripper hardware interface initialized: joint=gripper_opening_joint
     channel=can0 dry_run=false hardware_enable=true, calibration ...
 ```
 
-`dry_run=true` there means the real gripper is not being driven, whatever the
-launch file looked like.
-
-```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock hardware
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # fake firmware, real protocol
-```
-
-Both start the same controllers and the same nodes. The difference is the last
-centimetre, and it decides what the run can tell you.
-
-**virtual** replaces the hardware with `mock_components/GenericSystem`: no
-firmware, no daemon, no shared memory, no protocol, and the mock arm is at the
-commanded pose immediately. Use it to watch the whole path run cheaply, and to
-check *arithmetic*: axis directions, the return to the start pose, the gripper,
-what a release does. Measured on this machine: the return to the start pose lands
-within 0.0003 rad, and a 12 cm controller move produces a 12.5 cm end effector
-move (the extra 4 percent is the designed smoothing tail).
-
-**sim** runs the real firmware daemon in dry run mode: the real protocol, the real
-framing, the real state reporting rate, and a fake firmware on a pty instead of
-an arm. Nothing is attached to a serial port and `can0` is never opened. Use it to
-check *behaviour that only exists with the real path*: that the firmware accepts
-the command stream, that a continuous stream is produced at all (it has a 100 ms
-watchdog), and that both command interfaces are written. It is the run that
-distinguishes this controller from one that writes position only, because the
-fake firmware freezes the reference on a zero velocity exactly as the real one
-does.
-
-Its own documentation warns against reading dynamics from it, and that warning is
-real: the fake firmware is a first order kinematic model, so a following error or
-a tracking ratio measured there means nothing. On this machine the sim run does
-confirm that the arm moves and in the right direction, and shows the end effector
-delivering about a quarter of the controller's motion - which is what a lagging
-plant does to a velocity form mapping that re-bases its target on the measured
-pose each frame, not a property of the command path.
-
-Neither launch can reach real hardware. The dry run flag is hardcoded rather than
-exposed as an argument, and the shared memory segment is named separately from
-the arm stack's (`/litearm_vr_hw` rather than `/litearm_hw`) so this stack cannot
-attach to a segment belonging to a running arm stack. A real hardware launch is
-one copy of `teleop_sim.launch.xml` with `dry-run` removed from the daemon
-arguments and the shared memory name changed back - and, before it is used, the
-four items in "Before real hardware" below.
-
-There is deliberately no `move_group`. Planning is inside `vr_teleop_node`, so a
-planner node here would be a second, unused planning entry.
+The first says the arm will be drawn rather than silently missing in rviz. The
+second says which control logic and which calibrations the node is running with.
+The third is the gripper's own account of itself: `dry_run=true` there means a real
+gripper is not being driven whatever the launch file looked like, and
+`hardware_enable` is a *different* gate from the velocity bound the component needs
+before it will send any motion frame at all - a component that is enabled, holding
+torque and refusing every motion frame is what a missing bound looks like.
 
 ## Configuration
 
@@ -502,8 +478,11 @@ cd <colcon workspace>
 colcon build --symlink-install
 source install/setup.bash
 
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py
 ```
+
+That moves nothing: it is the simulated bench. Add `dry_run:=false` for the
+hardware, once the checklist below has been walked.
 
 The headset connects to `ws://<this machine>:8765`. The port can be moved with
 `headset_port:=`. Note that `vr_control`'s `ws_echo_server.py` also defaults to

@@ -27,4 +27,4 @@ rather than producing an URDF that urdfdom refuses with
 
 If the detected name is wrong for your workspace, override it:
 
-    ros2 launch litearm_vr_teleop teleop_virtual.launch.xml arm_description_package:=<name>
+    ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py arm_description_package:=<name>

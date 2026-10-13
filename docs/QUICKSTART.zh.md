@@ -21,7 +21,7 @@ colcon build --symlink-install
 source install/setup.bash
 
 # ③ 起虚拟栈（不起 RViz，先确认链路）
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml use_rviz:=false
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py use_rviz:=false   # 默认 dry_run:=true，不动硬件
 ```
 
 看到这三行就对了：
@@ -152,8 +152,7 @@ for j in ['joint1','joint2','joint3','joint4','joint5','joint6','joint7','grippe
 > `observation.state[8]` 的数据集）都会拿到一组「看起来很像数据」的乱序关节角**，
 > 而且两次运行还不一样。一律按名字取。
 
-判据（`teleop_virtual` 从全 0 起步；`teleop_sim` 的假固件从另一个姿态起步，所以看
-「按下 grip 之后」的值）：
+判据（仿真的臂从全 0 起步，所以看「按下 grip 之后」的值）：
 
 - 按住 grip 约 10 秒后 → `joint1..7` 应≈ `[0, -0.6458, 0, -1.9897, 0, -0.8378, 0]`（起点姿态）
 - 推那 12 cm 期间 → `joint1` 变正、`joint3`/`joint5` 变负（手柄右移 = 基座 +x）
@@ -162,30 +161,24 @@ for j in ['joint1','joint2','joint3','joint4','joint5','joint6','joint7','grippe
 ## 5. 要看可视化
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml      # 默认带 RViz
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py   # 默认带 RViz
 ```
 
 RViz 里只有 `RobotModel` + `TF` + `Grid` + `Axes`（固定系 `base_link`）。**故意没有**
 MoveIt 的 MotionPlanning 面板：本栈的规划在 `vr_teleop_node` 里，不起 `move_group`。
 
-## 6. 仿真（假固件）怎么起
+## 6. 真机怎么起
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py dry_run:=false
 ```
 
-它起真的固件守护进程，只是把固件换成 pty 上的假固件：协议、帧格式、100 Hz 状态上报
-都是真的，串口与 CAN 一个都不开。**它能回答的事和虚拟栈不同**：
+`dry_run:=false` 是**唯一**的模式开关（默认 true = 仿真，什么都不动）。它会加载硬件驱动：臂的直连
+USB 组件在 configure 时使能电机，夹爪组件打开它的电机闸门；握把按下会先把臂送回起始姿态（0.5 rad/s）。
+跑之前看包内 README 的 "Before real hardware"，并确认急停在手边、臂有支撑。
 
-- 固件是否接受这条指令流（它有 100 ms 看门狗，指令流必须连续）
-- 命令帧的 `position` 与 `velocity` 写没写对 —— 只写位置的 forward 控制器在这条路上
-  会「收指令但一动不动」（固件把 velocity 当位置参考的斜率上限，0 就是冻结）
-- 控制器周期与上报率是否匹配
-
-**别用它整定增益**：假固件是一阶运动学模型，其自身文档明确说不能用来读动力学。实测
-现象：臂**确实会动、方向也对**，但末端只走出指令位移的约四分之一 —— 那是一阶滞后被
-「目标每帧按实测位姿重新基准」的速度式映射放大的结果，不是指令通道的问题（同一份代码
-在 mock 上是 1.04 倍）。
+三条 launch 的差别只有"控制谁"：`teleop_arm` / `teleop_gripper` / `teleop_arm_gripper`。不控制的
+设备保持仿真 —— 一个真实的组件、没人给它指令，就是一颗被通电保持的电机。
 
 ## 7. 拍不到时按现象查
 
@@ -214,5 +207,5 @@ pgrep -af 'vr_teleop_nod[e]|ros2_control_nod[e]|headset_lin[k]|rviz[2]|litearm_h
 ls /dev/shm/ | grep litearm          # 只跑虚拟栈的话应为空
 ```
 
-`teleop_sim` 用的共享内存段是 `/litearm_vr_hw`（**故意**与臂栈默认的 `/litearm_hw`
-分开，免得本栈接到一个正在跑的臂栈的段上去）。异常退出后它可能留在 `/dev/shm`，删掉即可。
+这三条 launch 都不使用共享内存段（臂的直连组件自己开串口）。若 `/dev/shm` 里残留了
+`litearm*` 段，那是另一个栈留下的，删掉即可。

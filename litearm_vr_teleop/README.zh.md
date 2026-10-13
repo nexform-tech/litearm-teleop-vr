@@ -77,33 +77,43 @@ LitearmSystem / mock       <ros2_control> 硬件组件
 
 ### 手柄的旋转怎么传到末端
 
-`config/vr_teleop.yaml` 里的 `rotation_mode` 二选一，差别就是操作员转手时看到什么：
+两套控制逻辑，由 `config/vr_teleop.yaml` 里的 `control_frame` 二选一，差别就是操作员转手时看到什么：
 
-- **`world`（默认）** —— 末端绕**世界**里同一根轴、转同样的角度：手柄滚转，夹爪跟着滚转；手柄摆头，
-  夹爪的头在房间里朝同一个方向摆。它与臂的姿态无关，也与手柄怎么握无关。
-- **`tool`** —— 末端在**自己的**坐标系里逐轴照抄手柄。只有当中末端的坐标系与手柄的坐标系处在
-  某一个特定关系时，它才等于上面那个动作。
+- **`base_link`（默认）**——手柄的旋转增量被搬到**机器人基座坐标系**里施加：工具绕**世界里那根同样的轴**
+  转、转同样的角度。操作员拧手柄，工具跟着拧；操作员摆手柄的"鼻子"，工具在房间里朝同一方向摆。
+  与手臂姿态、与手柄怎么拿都无关。
+- **`tool`**——增量在**手柄自身坐标系**里读取、在**工具自身坐标系**里施加，工具逐轴照抄手的动作。只有
+  工具坐标系与手柄坐标系处于**某一个特定关系**（= 它的标定被测量时的那个姿态）时，两者才是同一个动作。
 
-默认取 `world`，原因是那个"特定关系"**属于臂的姿态而不是属于这套设备**：参考实现那组逐轴符号是
-在**手腕滚转使末端自身 Y 轴竖直向下**的姿态上实测的；换成别的滚转，末端坐标系相对世界就整体滚了
-那么多，`tool` 会把手部的旋转答成一个**被旋转了同样角度**的运动。而本包的遥操起点姿态，手腕滚转
-与那个实测姿态差了约 95° —— 操作员一上手就能感觉到。两种模式在实测姿态上**逐位相同**，所以
-`world` 在当初测量它的地方复现那次实测动作，在别处也不再漂。
+默认是 `base_link`，因为那个"特定关系"是**手臂姿态**的性质、不是设备的性质：tool 逻辑的那组符号是在
+"手腕滚转到工具自身 Y 轴朝正下方"时测的；换成任何其他手腕滚转，工具坐标系就相对世界滚了那么多，tool
+逻辑于是把一次手的旋转答成**被旋转了同样角度**的动作。遥操起始位姿的手腕滚转距那次测量姿态约 **95°**，
+这是操作员立刻感觉得到的差别。两者只在被测量的那个姿态上完全一致 —— 所以 `base_link` 在被测量的地方
+复现那次测量的动作，并在其他地方保持不变。
 
-帧对应关系（头显参考系是重力对齐的、但相对机器人有偏航）仍然是**实测常量**，它按安装分档，因为
-它取决于操作员站在哪一侧。位于它之上的两个参数是**活的** —— 能判断符号对不对的人就是握着
-手柄的那个人：
+**每套逻辑各带自己的标定**，因为两者读的是同一组三个数、但在不同坐标系里；对一个是对的镜像，对另一个
+就是错的：
+
+| 参数 | 逻辑 | 那三个数读所在坐标系 |
+| --- | --- | --- |
+| `base_link_rotation_signs` | `base_link` | 机器人基座轴（x 右、y 前、z 上） |
+| `tool_rotation_signs` | `tool` | 工具自身轴 |
+
+它们都是**这台设备的实测值**，参数文件里写明了设置时看到的现象。它们下面那层"坐标系对应关系"（头显参考
+系是重力对齐的、但相对机器人有偏航）同样是实测常量，而且**逐安装**：它取决于操作员站在哪一侧。三个键
+都是**活的**，因为能判断方向对不对的人是拿着手柄的那个人：
 
 ```bash
-ros2 param set /vr_teleop rotation_signs "[1.0, 1.0, -1.0]"
-ros2 param set /vr_teleop rotation_mode tool
+ros2 param set /vr_teleop control_frame tool
+ros2 param set /vr_teleop base_link_rotation_signs "[-1.0, -1.0, 1.0]"
 ```
 
-`rotation_signs` 默认 `[1, 1, 1]`，含义是**"该模式按实测原样"**：它是叠在该模式自身基准之上的一层修正
-—— `world` 的基准是"无"，`tool` 的基准是参考实现实测的 `[1, -1, -1]`。这样"在线切到 `tool`"拿到的
-才是**上一版那套实测行为**，而不是一套漏掉符号的 tool 模式。修正逐轴作用在**该模式读取的那个
-坐标系**里：`world` 是机器人轴、`tool` 是末端自身轴。它留给几何修不了的情况 —— 头显参考系被镜像，
-或者手柄被习惯性倒着握。改完**下一帧**生效，在那之前臂保持不动。
+改动在**下一个手柄帧**生效，在此之前臂保持当前姿态。启动日志会打出当前逻辑和两套标定 —— 会话状态可以
+问它，不用记。
+
+**两者看起来一样的时候，怎么分辨。** 在 tool 标定被测量的那个姿态上，两者确实一样；任何转轴恰好与工具
+自身轴重合的动作也一样。离开那个姿态就有区别：绕**世界竖直轴**拧手柄，`base_link` 下工具的**指向**在
+世界里扫过去，`tool` 下工具基本只是绕自身长轴滚。
 
 ### 抖动，以及指令流里那几个数是怎么来的
 
@@ -282,76 +292,49 @@ ros2 param set /vr_teleop rotation_mode tool
 移植自参考实现）。**不信求解器自己报的成功标志**，也不信求解器自己报的失败 —— 解超差就当作
 无解，此时**持位**而不是把带残差的方向发给操作员。
 
-## 四、两个 launch
+## 四、三个 launch
+
+一个台架一个入口，一个开关：`dry_run` 决定这次跑的是**硬件驱动**还是**仿真**。
 
 ```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock 硬件
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # 假固件 + 真协议
+ros2 launch litearm_vr_teleop teleop_arm.launch.py            # 只手臂
+ros2 launch litearm_vr_teleop teleop_gripper.launch.py        # 只夹爪（手臂仿真）
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py    # 手臂 + 夹爪
+
+# 要驱动硬件就加这个开关（用哪条 launch 都行）
+ros2 launch litearm_vr_teleop teleop_arm_gripper.launch.py dry_run:=false
 ```
 
-两者启动同一套控制器和节点，差别在最后那一厘米，而那一厘米决定了这次运行能说明什么。
-
-### 夹爪：哪条 launch 才驱得动它
-
-夹爪的硬件由 xacro 参数配置，这里已经把那些参数**提升为 launch 参数**，所以"台架上装了什么"由命令行决定，
-不需要改 xacro。其中两个参数挡的不是同一件事，**要动真夹爪必须两个都打开**：
-
-| 参数 | 默认 | 它挡什么 |
+| launch | 控制什么 | `dry_run:=false` 驱动什么 |
 | --- | --- | --- |
-| `litegrip_dry_run` | `true` | 是否碰硬件：true 时组件驱动一个模拟被控对象，而不是 can0 |
-| `litegrip_hardware_enable` | `false` | 电机闸门："到底有没有装夹爪" |
-| `litegrip_channel` / `_can_id` / `_mst_id` | `can0` / `8` / `24` | 挂在哪个总线、哪两个 CAN id |
-| `litegrip_max_feedback_velocity_rad_s` | `1.5` | 没有正的速度上界时组件**一帧运动指令都不发**；xacro 自己的默认是负值（fail-closed） |
+| `teleop_arm` | 手臂；夹爪组件保持仿真 | 臂的直连 USB 组件（configure 时使能电机） |
+| `teleop_gripper` | 夹爪；手臂保持仿真 | 夹爪组件（同时打开它的电机闸门） |
+| `teleop_arm_gripper` | 两者 | 两者 |
 
-```bash
-# 真夹爪 + 假臂（台架常用：臂由 daemon 的 dry run 顶替）
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml \
-    litegrip_dry_run:=false litegrip_hardware_enable:=true
+`dry_run` 是**唯一**的模式参数，默认 true —— 所以误启动的 launch 什么都不动。**不控制的设备也保持仿真**
+不是讲卫生：一个真实的组件、却没人给它指令，就是一颗被通电保持的电机；手臂这条 launch 没有理由去开夹爪
+的闸门。夹爪那条反过来，必须把手臂仿真起来 —— 遥操节点需要一个关节状态来"持位"和规划，台架上没有臂时，
+仿真的那个就是它的来源。
 
-# 真夹爪 + 真臂
-ros2 launch litearm_vr_teleop teleop_stack.launch.xml use_mock_hardware:=false \
-    litegrip_dry_run:=false litegrip_hardware_enable:=true
-```
+其余参数只有 `use_rviz` 和 `headset_port`；所有可以调的数值都在 `config/vr_teleop.yaml` 里（TCP 偏移
+原先单独一个文件，现在也并入其中）。
 
-**`teleop_virtual.launch.xml` 无论怎么传都驱不动真夹爪**，所以它一个夹爪参数都不暴露：它的 mock 硬件是
-**一个组件同时覆盖臂和夹爪**，夹爪的硬件跟着臂一起被模拟了。两个方向都靠同一行日志判断：
+描述始终是一台机器人，所以决定里面装哪套硬件块的仍然是 xacro 参数 `use_mock_hardware` 与
+`litegrip_dry_run` / `litegrip_hardware_enable` —— 由 launch 根据 `dry_run` 设置，别处不设置。
+
+日志里有三行值得认识，每一行都意味着"这次跑起来了"和"看起来跑起来了"的区别：
 
 ```text
+description meshes: all packages resolve (litearm_description x18, litegrip_description x6)
+control logic 'base_link': signs [-1.00 -1.00 1.00] (base_link [...], tool [...])
 [LitegripSystem] gripper hardware interface initialized: joint=gripper_opening_joint
     channel=can0 dry_run=false hardware_enable=true, calibration ...
 ```
 
-这一行里 `dry_run=true` 就表示真夹爪没被驱动 —— 不管 launch 看起来是什么样。
-
-```bash
-ros2 launch litearm_vr_teleop teleop_virtual.launch.xml   # mock 硬件
-ros2 launch litearm_vr_teleop teleop_sim.launch.xml       # 假固件，真协议
-```
-
-两者起同样的控制器和同样的节点，差别只在最后那一厘米，而这一厘米决定了这次运行**能告诉你
-什么**。
-
-**virtual** 用 `mock_components/GenericSystem` 顶替硬件：没有固件、没有守护进程、没有共享
-内存、没有协议，被控对象「即时到位」。用它便宜地看整条路跑起来，以及校验**算术**：轴方向、
-能不能回到起点姿态、夹爪、松手会不会漂。本机实测：回到起点姿态的最大误差 **0.0003 rad**；
-手柄右移 12 cm → 末端 base +x 走 **0.1249 m**（多出的 4% 是设计内的平滑拖尾）。
-
-**sim** 起真的固件守护进程但用 `--dry-run`：真协议、真帧、真上报率，固件换成 pty 上的假
-固件。用它校验**只有真链路才存在的行为**：固件是否接受这条指令流、指令流是否连续（固件有
-100 ms 看门狗）、两条命令接口是否都写了。**它就是「只写位置的控制器」与本控制器的分界线**，
-因为假固件会像真固件一样在 velocity 为 0 时冻结参考。
-
-它自己的文档警告不要从这里读动力学，这个警告是认真的：假固件是一阶运动学模型，在这里量到的
-跟随误差或跟随比例说明不了任何事。本机实测：臂**确实会动、方向也对**，但末端只走出指令位移
-的约四分之一 —— 这是一阶滞后被「目标每帧按实测位姿重新基准」的速度式映射放大的结果，**不是
-指令通道的问题**（同一份代码在 mock 上是 1.04 倍）。
-
-两个 launch 都**碰不到真机**：dry run 是硬编码而不是可传参数，共享内存段名也单独取
-（`/litearm_vr_hw`，不是臂栈的 `/litearm_hw`），所以本栈不可能接到一个正在跑的臂栈的段上。
-真机 launch = 把 `teleop_sim.launch.xml` 复制一份、从守护进程参数里去掉 `--dry-run`、把共享
-内存段名改回去 —— 但用之前先看第七节那四条。另外：**故意不起 `move_group`**，因为规划在
-`vr_teleop_node` 里，再起一个规划节点就是第二个没人用的规划入口（它还会和本控制器抢
-`joint1..7` 的接口）。
+第一行说明臂在 rviz 里会被画出来、而不是静默缺失；第二行说明节点当前跑的是哪套控制逻辑、两套标定各是
+什么；第三行是夹爪组件对自己的交代 —— 这里 `dry_run=true` 就表示真夹爪没被驱动（不管 launch 看起来是
+什么样子），而 `hardware_enable` 与"组件肯不肯发出运动帧所需的速度上界"是**两道不同的门**：一个已使能、
+在持扭矩、却拒绝每一帧运动指令的组件，就是"上界缺失"的样子。
 
 ## 五、配置
 
