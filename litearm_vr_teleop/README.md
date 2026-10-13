@@ -3,7 +3,8 @@
 VR teleoperation for the 7-axis LiteArm with a LiteGrip gripper, on ros2_control.
 
 > Chinese documentation: [README.zh.md](README.zh.md). A five minute path through the
-> stack: [QUICKSTART.zh.md](../docs/QUICKSTART.zh.md). Code comments and this file are the
+> stack: [quickstart.md](../docs/quickstart.md), and the same in Chinese in
+> [quickstart.zh-CN.md](../docs/quickstart.zh-CN.md). Code comments and this file are the
 > reference; the Chinese documents follow them.
 
 A Quest 3 controller drives the arm and the gripper over the same hardware path
@@ -277,7 +278,7 @@ its configured rate from whatever is in that slot, and the joint filter and rate
 limiter interpolate between solutions. That thread also ticks the target at the
 same rate - `ControlTick` - and each tick feeds the newest headset frame to the
 mapper, so the target advances on this node's clock rather than on the link's. This is what makes the stream independent
-of the solver: with the plugin backend on the reference machine a solve takes
+of the solver: with the plugin backend a solve can take
 tens of milliseconds, and while it ran on the control path the command stream
 inherited that period. On mock hardware, where the state mirrors the command,
 that is visible as a staircase in a position plot - flat, step, flat - and the

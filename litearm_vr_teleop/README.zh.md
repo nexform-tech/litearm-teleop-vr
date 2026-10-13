@@ -8,7 +8,7 @@ WebSocket 通信是 `vr_control` 里原样保留下来的那部分；规划算�
 到 C++** 的。
 
 > 代码注释与英文 `README.md` 为英文；本文件是中文文档，与英文版不一致时以英文为准。
-> 快速上手见仓库根的 [`QUICKSTART.zh.md`](../docs/QUICKSTART.zh.md)。
+> 快速上手见仓库根的 [`quickstart.zh-CN.md`](../docs/quickstart.zh-CN.md)。
 
 ---
 
@@ -17,7 +17,7 @@ WebSocket 通信是 `vr_control` 里原样保留下来的那部分；规划算�
 ```text
 Quest 3 WebXR 页面（~72 Hz，每帧一条 JSON，ws 明文）
         │
-        ▼  ws://<本机>:8765
+        ▼  ws://<主机>:8765
 headset_link.py            只做传输：解析、发布、计数
         │
         ▼  /vr_controller_frame（litearm_vr_teleop/msg/VrControllerFrame）
@@ -39,7 +39,7 @@ LitearmSystem / mock       <ros2_control> 硬件组件
 
 ## 二、为什么必须是 forward 控制器，而且必须写速度
 
-官方的 `forward_command_controller/ForwardCommandController` 每个关节写一条接口，而在本机
+官方的 `forward_command_controller/ForwardCommandController` 每个关节写一条接口，而在本栈
 臂上那样做的结果是**「臂收下指令但一步不动」**：固件把指令帧里的 velocity 读作位置参考的
 斜坡上限；只认领 `position` 的控制器会把 velocity 接口留在硬件初始化时的值上，也就是 0，
 于是参考被冻结。**没有任何地方会报错。**
@@ -54,13 +54,13 @@ LitearmSystem / mock       <ros2_control> 硬件组件
 
 另外两处覆盖，理由都写在覆盖点旁边：
 
-- **`command_interface_configuration()`**：本机 ros2_control（**2.54.2**）的基类返回的是**裸
+- **`command_interface_configuration()`**：ros2_control（**2.54.2**）的基类返回的是**裸
   接口名** `["position","velocity"]`，而不是 `关节/接口`。控制器管理器不把它当空配置，而
   是**整个管理器进程 abort**：
   `Character '/', was not find in the interface name 'position'`。自己拼名即可。
 - **`on_configure()`**：自己建订阅，好把每条消息的**到达时刻**记下来。陈旧判据不能只看值，
   因为「持位」本身就是一个合法的值。命令陈旧时控制器**按实测位姿 + 速度 0** 持位 —— 这是
-  本机固件唯一真正的「停住」姿势。
+  该固件唯一真正的「停住」姿势。
 
 ## 三、遥操行为分布在哪
 
@@ -123,7 +123,7 @@ ros2 param set /vr_teleop base_link_rotation_signs "[-1.0, -1.0, 1.0]"
 72 Hz、带抖动、Wi-Fi 忙时更少 —— 而"每次到达就迈一步"等于**步长由这一到达花了多久决定**。所以节点
 按 `control_rate_hz` 打拍，每拍把手头最新的帧喂给 mapper：每一步都是一个控制周期那么长，手柄的频率只
 决定这一步里的位姿有多新。求解器只在目标真的变了时再解一次：求解器不是确定性的（SNS 的搜索会在 7 轴
-零空间里随机重启），对**同一个目标**每次问它都会返回略微不同的解 —— 几百分之一弧度的关节抖动，在本机
+零空间里随机重启），对**同一个目标**每次问它都会返回略微不同的解 —— 几百分之一弧度的关节抖动，在本栈
 表现出的症状正是"手没动、指令却在动"。两次求解之间直接重发上一次的解（固件的看门狗要的是连续流，不是
 连续新目标），关节滤波继续向它收敛 —— 一步因此变成一小段斜坡而不是台阶。mock 上实测：**手完全静止时
 指令逐采样变化 0.00000 rad**（改前一个周期就跳 0.049 rad），加 0.3 mm 模拟跟踪噪声后速度请求峰值
@@ -285,7 +285,7 @@ ros2 param set /vr_teleop base_link_rotation_signs "[-1.0, -1.0, 1.0]"
 
 | 后端 | 说明 |
 |---|---|
-| `plugin`（默认） | 用 pluginlib 按**类名**加载 MoveIt 配置里指定的求解器（本机 = `sns_ik_kinematics_plugin::SnsIkKinematicsPlugin`），求解器自己的调参（`solver_type` / `loop_period` / `eps` / `timeout`）从节点参数读 —— 这正是「复用 moveitconfig」最字面的做法。代价：单次求解的时延不归本节点管（配置给的预算是 0.2 s）。 |
+| `plugin`（默认） | 用 pluginlib 按**类名**加载 MoveIt 配置里指定的求解器（`vr_teleop.yaml` 里写的是哪个类就用哪个），求解器自己的调参（`solver_type` / `loop_period` / `eps` / `timeout`）从节点参数读 —— 这正是「复用 moveitconfig」最字面的做法。代价：单次求解的时延不归本节点管（配置给的预算是 0.2 s）。 |
 | `dls` | 自研阻尼最小二乘，架在 MoveIt core 已提供的正运动学与雅可比之上：以实测关节角为种子、用阻尼项代替对奇异雅可比求逆、零空间往种子拉（7 轴 6 自由度，冗余方向需要有定义）。时延可预期。 |
 
 两者都用**同一个验收方式**：拿解回去跑一遍正运动学，比对位置/姿态残差（3 mm / 0.05 rad，
@@ -343,7 +343,7 @@ control logic 'base_link': signs [-1.00 -1.00 1.00] (base_link [...], tool [...]
 同时在跑。
 
 这个文件里还有一条值得单独读的注释：`/joint_states` 的**数组顺序不是 `joint1..7`，而且每次
-重启都可能变**（本机实测两次同样的 launch 得到同一个集合、不同的顺序，夹爪在两端各出现一次）。
+重启都可能变**（实测两次同样的 launch 得到同一个集合、不同的顺序，夹爪在两端各出现一次）。
 给广播器配 `joints`/`interfaces` 只能筛「发哪些」，管不了「按什么顺序发」。**所以一律按名字取**
 —— 按 `position[i]` 取值的消费者会拿到一组「看起来很像数据」的乱序关节角，而且两次运行还不
 一样。
@@ -380,7 +380,7 @@ control logic 'base_link': signs [-1.00 -1.00 1.00] (base_link [...], tool [...]
 
 ## 七、哪些解释器跑 Python 节点
 
-本机系统 `python3` **没有** `websockets`，ROS 安装也不提供。`headset_link.py` 启动时先查，
+系统 `python3` 通常**没有** `websockets`，ROS 安装也不提供。`headset_link.py` 启动时先查，
 缺了就 `execve` 进 `LITEARM_VR_PYTHON` 指定的解释器（默认
 `$HOME/venvs/metavr-arm/bin/python`）。这个自举是**原地**的（保持 PID），所以 launch 的进程
 管理与 SIGINT 投递都不变；已经有 `websockets` 时整段跳过（`LITEARM_VR_PYTHON` 由 launch 参数

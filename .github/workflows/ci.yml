@@ -154,7 +154,8 @@ jobs:
           test -s README.md
           test -s AGENTS.md
           test -s LICENSE
-          test -s docs/QUICKSTART.zh.md
+          test -s docs/quickstart.md
+          test -s docs/quickstart.zh-CN.md
           python3 -c "import json; json.load(open('.releaserc.json'))"
           python3 -c "import json; json.load(open('.markdownlint.json'))"
           for manifest in litearm_vr_teleop/package.xml litearm_vr_moveit_config/package.xml; do

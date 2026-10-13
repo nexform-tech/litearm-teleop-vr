@@ -10,7 +10,7 @@
 （`litearm_moveit_config`）才是入口，它自带 OMPL 与 `move_group` 需要的全套配置。
 
 > 代码注释为英文；本文件是中文文档，与英文侧不一致时以注释为准。
-> 使用者是 `litearm_vr_teleop`，快速上手见仓库根的 [`QUICKSTART.zh.md`](../docs/QUICKSTART.zh.md)。
+> 使用者是 `litearm_vr_teleop`，快速上手见仓库根的 [`quickstart.zh-CN.md`](../docs/quickstart.zh-CN.md)。
 
 ## 文件构成
 
@@ -44,7 +44,7 @@ mock 块导出的接口面刻意与真硬件保持一致（臂：position+veloci
 
 ```bash
 source /opt/ros/humble/setup.bash
-source ~/wkspace/ros2_ws/install/setup.bash
+source ~/arm_ws/install/setup.bash
 xacro urdf/litearm_vr.urdf.xacro use_mock_hardware:=false | grep -c "<ros2_control"   # 2
 xacro urdf/litearm_vr.urdf.xacro use_mock_hardware:=true  | grep -c "<ros2_control"   # 1
 xacro srdf/litearm_vr.srdf.xacro | grep -E "group_state|end_effector"
