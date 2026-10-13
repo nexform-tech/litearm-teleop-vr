@@ -44,6 +44,7 @@
   <arg name="headset_python" default="$(env HOME)/venvs/metavr-arm/bin/python"
        description="interpreter providing the websockets module"/>
   <arg name="ik_backend" default="plugin" description="plugin or dls"/>
+  <arg name="follow_mode" default="velocity" description="velocity (default) or position"/>
   <!-- Only needed if the build-time detection picked the wrong description package,
        which can happen in a workspace that installs both names. -->
   <arg name="arm_description_package" default="$(command 'cat $(find-pkg-share litearm_vr_moveit_config)/config/arm_description_package.txt')"
@@ -59,6 +60,7 @@
     <arg name="headset_port" value="$(var headset_port)"/>
     <arg name="headset_python" value="$(var headset_python)"/>
     <arg name="ik_backend" value="$(var ik_backend)"/>
+    <arg name="follow_mode" value="$(var follow_mode)"/>
     <arg name="arm_description_package" value="$(var arm_description_package)"/>
     <arg name="ros_domain_id" value="$(var ros_domain_id)"/>
     <arg name="ros_localhost_only" value="$(var ros_localhost_only)"/>

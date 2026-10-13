@@ -186,6 +186,12 @@ install(PROGRAMS python/headset_link.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# The description check the launch runs: it needs no ROS libraries, only the
+# AMENT prefix path, so it installs as a plain program like the link does.
+install(PROGRAMS tools/check_description_meshes.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
@@ -256,6 +262,19 @@ if(BUILD_TESTING)
   # no headset and no rclpy: the module is loaded by path and frames are fed in
   # directly.
   ament_add_pytest_test(test_headset_link test/test_headset_link.py
+    APPEND_ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
+  )
+
+  # The description-mesh check the launch runs: it must name the package a
+  # description refers to and cannot reach, and must stay quiet when it can.
+  ament_add_pytest_test(test_description_meshes test/test_description_meshes.py
+    APPEND_ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
+  )
+
+  # The two rates the command path is built on, and the joint order the flat
+  # command array means. Both are repeated between this package's own two
+  # configuration files, which is what makes them checkable here at all.
+  ament_add_pytest_test(test_rate_consistency test/test_rate_consistency.py
     APPEND_ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
   )
 endif()

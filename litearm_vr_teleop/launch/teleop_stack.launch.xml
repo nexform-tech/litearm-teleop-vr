@@ -47,6 +47,8 @@
   <arg name="arm_description_package"
        default="$(command 'cat $(find-pkg-share litearm_vr_moveit_config)/config/arm_description_package.txt')"
        description="package providing the bare arm description (no ros2_control blocks). Default comes from litearm_vr_moveit_config's build, which detected it: the name differs between workspaces (litearm vs litearm_description) and xacro cannot compose it from a variable"/>
+  <arg name="follow_mode" default="velocity"
+       description="velocity (hand speed integrated at the control rate, the default) or position (target and solver)"/>
   <arg name="ik_backend" default="plugin"
        description="inverse kinematics backend: plugin (the MoveIt solver named in the configuration) or dls (damped least squares, implemented in this package)"/>
   <arg name="ros_domain_id" default="42" description="ROS domain for this stack"/>
@@ -90,6 +92,16 @@
        substitute an argument or a property inside its own parentheses. Both were
        tried. Launch substitutions do nest, which is why the composition lives on
        this side. -->
+  <!-- A description whose meshes live in a package this environment cannot see
+       produces a stack that runs and a display that shows nothing, with the only
+       complaint coming from rviz and naming a package that does exist elsewhere
+       on the machine. One line here, before any of that, is the whole fix for
+       the confusion. It never fails the launch: such a stack still teleoperates
+       the arm, and a display is not a reason to refuse to move it. -->
+  <let name="description_meshes"
+       value="$(command '$(find-pkg-prefix litearm_vr_teleop)/lib/litearm_vr_teleop/check_description_meshes.py $(find-pkg-share $(var arm_description_package)) $(find-pkg-share litegrip_description)')"/>
+  <log message="$(var description_meshes)"/>
+
   <let name="arm_description_xacro"
        value="$(find-pkg-share $(var arm_description_package))/urdf/$(var arm_description_package).urdf"/>
   <let name="urdf"
@@ -101,7 +113,7 @@
   <let name="controller_params"
        value="$(find-pkg-share litearm_vr_teleop)/config/vr_controllers.yaml"/>
 
-  <log message="──────── LiteArm VR teleop ────────&#10;  mock hardware: $(var use_mock_hardware)&#10;  arm description: $(var arm_description_package)&#10;  headset: ws://0.0.0.0:$(var headset_port)&#10;  inverse kinematics backend: $(var ik_backend)&#10;  To watch this stack from another terminal, export:&#10;      export ROS_DOMAIN_ID=$(var ros_domain_id) ROS_LOCALHOST_ONLY=$(var ros_localhost_only)&#10;────────────────────────────────────"/>
+  <log message="──────── LiteArm VR teleop ────────&#10;  mock hardware: $(var use_mock_hardware)&#10;  arm description: $(var arm_description_package)&#10;  headset: ws://0.0.0.0:$(var headset_port)&#10;  inverse kinematics backend: $(var ik_backend)&#10;  following: $(var follow_mode)&#10;  To watch this stack from another terminal, export:&#10;      export ROS_DOMAIN_ID=$(var ros_domain_id) ROS_LOCALHOST_ONLY=$(var ros_localhost_only)&#10;────────────────────────────────────"/>
 
   <!-- ── 1. hardware ───────────────────────────────────────────────────────── -->
 
@@ -191,6 +203,7 @@
     <param from="$(var teleop_params)"/>
       <!-- The TCP the teleop targets; see the file for what the offset means. -->
       <param from="$(find-pkg-share litearm_vr_teleop)/config/tcp.yaml"/>
+    <param name="follow_mode" value="$(var follow_mode)"/>
     <param name="ik_backend" value="$(var ik_backend)"/>
     <param name="robot_description" type="str" value="$(var urdf)"/>
     <!-- The SRDF is what names the planning group, so the kinematic model cannot be

@@ -142,6 +142,27 @@ public:
   /// same quantity in its warning.
   double minimumSingularValue(const Eigen::VectorXd & joints);
 
+  /// Joint speeds that produce this tool twist, by damped least squares.
+  ///
+  /// The velocity following mode's replacement for `solve`, and the step MoveIt
+  /// Servo takes on every cycle of its loop: the Jacobian is what maps a joint
+  /// speed to a tool speed, so a twist is what it answers directly, with no
+  /// iteration and no seed and therefore no dependence on where the solver
+  /// happens to start. On this machine that is the difference between a
+  /// millisecond and the tens of milliseconds a plugin takes, which is what lets
+  /// the following loop run at the control rate instead of around a solver.
+  ///
+  /// The damping has the same job it has in `solveDamped`, and the same cost:
+  /// near a singularity `J J^T` is inverted against a small number, and without
+  /// damping a bounded tool speed would ask for an unbounded joint speed.
+  ///
+  /// `joints` is where the Jacobian is evaluated - the measured joints, as Servo
+  /// uses - and the result is in the group's variable order. A twist that cannot
+  /// be answered at all gives zeros, which is a hold rather than a guess.
+  Eigen::VectorXd twistToJointVelocity(
+    const Eigen::Vector3d & linear, const Eigen::Vector3d & angular,
+    const Eigen::VectorXd & joints, double damping);
+
 private:
   /// Read a description parameter, declaring it if the launch file did not.
   std::string describeAndRead(const std::string & name, std::string & error) const;

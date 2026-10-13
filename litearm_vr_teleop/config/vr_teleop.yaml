@@ -24,10 +24,17 @@ vr_teleop:
     joint_state_topic: /joint_states
     command_topic: /vr_forward_controller/commands
 
-    # The control loop runs at this rate regardless of the headset's rate. Between
-    # two headset frames it keeps solving against the same absolute target, which
-    # is idempotent, so a rate above the headset's is not wasted work and a rate
-    # below it does not lose motion.
+    # The control loop runs at this rate regardless of the headset's rate. It
+    # paces two things, and both are deliberate: the command stream published to
+    # the controller, and the tick on which the hand's motion is folded into the
+    # Cartesian target. Between two headset frames the target keeps being advanced
+    # by the increment the frames so far describe, which is idempotent in the
+    # sense that matters here - the target is an absolute pose derived from the
+    # operator's displacement, so re-solving cannot accumulate motion - so a rate
+    # above the headset's is not wasted work and a rate below it does not lose
+    # motion. Ticking the target here rather than on each arrival is what keeps
+    # the link's timing out of the stream: a step sized by an arrival is sized by
+    # however long that arrival took.
     control_rate_hz: 100.0
 
     joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
@@ -88,7 +95,55 @@ vr_teleop:
     max_step_rad: 0.08
     max_joint_velocity: 2.0
     low_pass_tau: 0.02
-    moving_average_frames: 10
+    # Samples in the moving average of the hand's increment. One sample is one
+    # control tick, so this is 100 ms of smoothing at the control rate below and
+    # it does not stretch when the headset slows down - which it used to, since
+    # the samples were headset frames: ten of them were 139 ms at the measured
+    # 72 Hz and 278 ms on a link that had dropped to 36 Hz. Set 14 for the
+    # measured 139 ms.
+    moving_average_samples: 10
+
+    # Which control law follows the hand.
+    #
+    #   velocity  the hand's twist goes through the damped Jacobian, then a low
+    #             pass, then an acceleration and speed ceiling, and the position
+    #             written beside the velocity is that speed integrated at the
+    #             control rate. MoveIt Servo's arrangement, and the default: on
+    #             this arm the velocity field is what the firmware reads as the
+    #             slew ceiling of its position reference, so the loop hands it a
+    #             number it computed this cycle instead of a difference of two
+    #             positions for the controller to reconstruct. Nothing in this
+    #             path goes through a kinematics plugin, so the target is as fresh
+    #             as the tick rather than as fresh as the solver.
+    #
+    #   position  the previous behaviour: an absolute Cartesian target, solved by
+    #             the configured plugin on its own thread, with the joint filter
+    #             easing towards the answer. Targets the arm cannot reach are
+    #             refused and held rather than integrated, and `reference_pose`
+    #             decides whether a target that was not delivered is carried.
+    #
+    # Both are supported and either can be selected at any time; they can be
+    # compared on the same rig without a rebuild, which is the only honest way to
+    # choose between them.
+    follow_mode: velocity
+
+    # Velocity mode: time constant of the low pass on the commanded joint speed,
+    # seconds. Servo carries the same filter as `low_pass_filter_coeff`, a per
+    # iteration coefficient; a time constant is used here because this loop
+    # measures its interval, and a coefficient would mean a different cutoff every
+    # time a tick ran late. Zero turns the smoothing off and leaves the
+    # acceleration ceiling below to shape the command on its own.
+    velocity_filter_tau: 0.03
+
+    # Velocity mode: how far the integrated reference may run ahead of the arm,
+    # radians per joint. The joint space counterpart of max_target_lead_m below,
+    # and it is needed for the same reason plus one: the velocity form integrates,
+    # so an arm that lags leaves the reference further ahead every cycle, and an
+    # operator who keeps pushing while the arm cannot follow would wind it out to
+    # a joint limit. The command is scaled down - whole, not joint by joint, so
+    # the direction survives - as the worst joint approaches this. Zero or less
+    # disables the guard.
+    max_joint_lead_rad: 0.2
 
     # The motion profile of the command stream: how fast a joint may move, how
     # fast that speed may change, and how fast the change of speed may change.
@@ -151,8 +206,8 @@ vr_teleop:
     #
     # Read the cost before raising them in the `measured` mode: an increment
     # below the deadband is not accumulated, it is dropped, so the deadband acts
-    # as a velocity threshold of deadband / frame period (0.5 mm at 72 Hz is
-    # 3.6 cm/s). That is why both default to zero. With `reference_pose:
+    # as a velocity threshold of deadband / tick period (0.5 mm at the 100 Hz
+    # tick is 5 cm/s). That is why both default to zero. With `reference_pose:
     # commanded` the increments do accumulate and a deadband of a few tenths of
     # a millimetre is safe and useful.
     target_deadband_m: 0.0

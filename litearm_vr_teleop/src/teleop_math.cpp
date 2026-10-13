@@ -50,6 +50,49 @@ Eigen::Vector3d matrixToRotationVector(const Eigen::Matrix3d & rotation)
 
 }  // namespace
 
+namespace
+{
+
+/// Tolerance on the tick boundary, in seconds.
+///
+/// The grid is absolute and the clock is floating point, so a caller asking at
+/// exactly the nominal tick time can land a few femtoseconds on either side of
+/// it: `0.05 + 0.01` is not `0.06`. Without a tolerance the tick that misses
+/// waits for the next poll, so at a 1 ms poll one boundary is a period ten
+/// percent long - and because the grid is absolute, the phase never recovers.
+/// A nanosecond is far below any resolution this loop has and far above the
+/// arithmetic noise.
+constexpr double kTickTolerance = 1e-9;
+
+}  // namespace
+
+ControlTick::ControlTick(double rate_hz)
+: period_(1.0 / std::max(1.0, rate_hz))
+{
+}
+
+bool ControlTick::due(double now)
+{
+  if (!started_) {
+    started_ = true;
+    origin_ = now;
+    ticks_ = 1;
+    return false;
+  }
+  // The tick due at this instant is the first grid point after it. Asking for it
+  // this way covers both cases at once: on time, where that point is the next
+  // period, and late, where it is several periods on - and the periods in between
+  // are skipped rather than replayed, which is the whole point of an absolute
+  // grid for a loop that can be descheduled (see the class documentation).
+  const long long due_ticks =
+    static_cast<long long>(std::floor((now + kTickTolerance - origin_) / period_)) + 1;
+  if (due_ticks <= ticks_) {
+    return false;
+  }
+  ticks_ = due_ticks;
+  return true;
+}
+
 AxisMapping singleArmUprightMapping()
 {
   AxisMapping mapping;
@@ -99,7 +142,7 @@ TeleopIncrementMapper::TeleopIncrementMapper(AxisMapping mapping, TeleopLimits l
 {
   // A zero frame window would make the average divide by zero and never smooth
   // anything. Treat it as the smallest window that still averages.
-  limits_.moving_average_frames = std::max<std::size_t>(1, limits_.moving_average_frames);
+  limits_.moving_average_samples = std::max<std::size_t>(1, limits_.moving_average_samples);
 }
 
 bool targetDiffers(
@@ -178,21 +221,9 @@ void TeleopIncrementMapper::reset()
   history_.clear();
 }
 
-CartesianTarget TeleopIncrementMapper::feed(
-  const Eigen::Vector3d & position, const Eigen::Quaterniond & orientation,
-  const Eigen::Vector3d & ee_position, const Eigen::Matrix3d & ee_rotation)
+Eigen::Matrix<double, 6, 1> TeleopIncrementMapper::relativeMotion(
+  const Eigen::Matrix4d & controller)
 {
-  CartesianTarget target;
-
-  if (!active_) {
-    // Paused. Nothing is commanded and nothing is recorded: `start()` clears the
-    // history and re-anchors anyway, so accumulating increments here would only
-    // be work whose result is thrown away.
-    return target;
-  }
-
-  const Eigen::Matrix4d controller = poseToHomogeneous(position, orientation);
-
   // Relative motion of the controller between two frames. The inverse of a
   // rigid transform is its exact inverse, so the pseudoinverse the reference
   // reaches for is not needed here.
@@ -206,9 +237,6 @@ CartesianTarget TeleopIncrementMapper::feed(
   // carry is a similarity transform, because a rotation about an axis is a
   // rotation about the carried axis in the carried frame.
   const Eigen::Matrix3d controller_to_robot = mapping_.translation_remap.transpose();
-
-  const Eigen::Vector3d relative_translation =
-    controller_to_robot * delta.block<3, 1>(0, 3);
 
   Eigen::Matrix3d relative_rotation;
   if (mapping_.rotation_mode == RotationMapping::kWorld) {
@@ -226,18 +254,33 @@ CartesianTarget TeleopIncrementMapper::feed(
     relative_rotation = (rotation_frame.inverse() * delta * rotation_frame).block<3, 3>(0, 0);
   }
 
-  Eigen::Matrix<double, 6, 1> sample;
-  sample.head<3>() = relative_translation;
-  sample.tail<3>() = matrixToRotationVector(relative_rotation);
+  Eigen::Matrix<double, 6, 1> motion;
+  motion.head<3>() = controller_to_robot * delta.block<3, 1>(0, 3);
+  motion.tail<3>() = matrixToRotationVector(relative_rotation);
+  return motion;
+}
 
-  history_.push_back(sample);
-  while (history_.size() > limits_.moving_average_frames) {
+CartesianTarget TeleopIncrementMapper::feed(
+  const Eigen::Vector3d & position, const Eigen::Quaterniond & orientation,
+  const Eigen::Vector3d & ee_position, const Eigen::Matrix3d & ee_rotation)
+{
+  CartesianTarget target;
+
+  if (!active_) {
+    // Paused. Nothing is commanded and nothing is recorded: `start()` clears the
+    // history and re-anchors anyway, so accumulating increments here would only
+    // be work whose result is thrown away.
+    return target;
+  }
+
+  history_.push_back(Sample{relativeMotion(poseToHomogeneous(position, orientation)), 0.0});
+  while (history_.size() > limits_.moving_average_samples) {
     history_.pop_front();
   }
 
   Eigen::Matrix<double, 6, 1> averaged = Eigen::Matrix<double, 6, 1>::Zero();
   for (const auto & entry : history_) {
-    averaged += entry;
+    averaged += entry.motion;
   }
   averaged /= static_cast<double>(history_.size());
 
@@ -263,6 +306,58 @@ CartesianTarget TeleopIncrementMapper::feed(
   }
   target.valid = true;
   return target;
+}
+
+CartesianTwist TeleopIncrementMapper::feedRate(
+  const Eigen::Vector3d & position, const Eigen::Quaterniond & orientation, double dt)
+{
+  CartesianTwist twist;
+  if (!active_) {
+    return twist;
+  }
+
+  // The interval this sample covers: the caller's tick, floored so that a
+  // starved loop cannot divide by zero and authorise an unbounded speed.
+  const double interval = std::max(1e-3, dt);
+  history_.push_back(Sample{relativeMotion(poseToHomogeneous(position, orientation)), interval});
+  while (history_.size() > limits_.moving_average_samples) {
+    history_.pop_front();
+  }
+
+  // The average RATE over the window, which is the total motion over the total
+  // time it covered. Averaging the increments and then dividing by one interval
+  // would be the same thing only while every sample covered the same interval,
+  // and a tick that was late is exactly the case this has to survive.
+  //
+  // Entries with no interval are entries the increment form pushed - it has no
+  // use for one - and are skipped rather than divided by: the two forms are for
+  // two configurations of the node, and a session that switched between them
+  // without a `start()` would otherwise read a rate out of a zero interval.
+  Eigen::Matrix<double, 6, 1> travelled = Eigen::Matrix<double, 6, 1>::Zero();
+  double elapsed = 0.0;
+  for (const auto & entry : history_) {
+    if (entry.dt <= 0.0) {
+      continue;
+    }
+    travelled += entry.motion;
+    elapsed += entry.dt;
+  }
+  if (elapsed <= 0.0) {
+    // Nothing has been measured over an interval yet. Reporting no motion is the
+    // safe answer: the caller holds.
+    return twist;
+  }
+  const Eigen::Matrix<double, 6, 1> rate = travelled / elapsed;
+
+  const Eigen::Vector3d signs =
+    mapping_.rotation_mode == RotationMapping::kTool ?
+    mapping_.tool_rotation_signs.cwiseProduct(mapping_.rotation_signs) :
+    mapping_.rotation_signs;
+
+  twist.linear = rate.head<3>();
+  twist.angular = rate.tail<3>().cwiseProduct(signs);
+  twist.valid = true;
+  return twist;
 }
 
 JointTargetFilter::JointTargetFilter(TeleopLimits limits, std::size_t dof)
@@ -437,6 +532,96 @@ void JointRateLimiter::reset()
   velocity_.setZero();
   acceleration_.setZero();
   seeded_ = false;
+}
+
+JointVelocityProfile::JointVelocityProfile(JointVelocityLimits limits, std::size_t dof)
+: limits_(limits), velocity_(Eigen::VectorXd::Zero(static_cast<Eigen::Index>(dof)))
+{
+  // The same reading as every other limit in this file: a zero ceiling would
+  // freeze the arm and a negative time constant would smooth backwards.
+  limits_.max_velocity = std::abs(limits_.max_velocity);
+  limits_.max_acceleration = std::abs(limits_.max_acceleration);
+  limits_.filter_tau = std::abs(limits_.filter_tau);
+
+  // The state starts at rest rather than at the first command, which is what
+  // Servo's filter reset does as well (it seeds from the joint state, not from
+  // the command). Seeding from the command would put a step of speed in the
+  // field the firmware reads as a slew ceiling on the very first cycle of a
+  // following session, which is the one moment every other part of this stack
+  // is careful to start softly.
+}
+
+Eigen::VectorXd JointVelocityProfile::apply(const Eigen::VectorXd & target, double dt)
+{
+  if (target.size() != velocity_.size()) {
+    // A command for a different number of joints is a caller bug. Holding the
+    // last speed would move the wrong axes, so the arm is held still instead.
+    velocity_.setZero();
+    return velocity_;
+  }
+
+  const double safe_dt = sanitiseDeltaSeconds(dt);
+
+  // Filter first, then the ceilings, which is Servo's order as well: limiting
+  // before smoothing would let the filter ramp towards a speed the limit had
+  // already refused, and the filter's own state would carry it there.
+  const double alpha = safe_dt / (safe_dt + limits_.filter_tau);
+  const double acceleration_step = limits_.max_acceleration * safe_dt;
+  for (Eigen::Index i = 0; i < velocity_.size(); ++i) {
+    const double smoothed = velocity_(i) + alpha * (target(i) - velocity_(i));
+    const double bounded = std::max(
+      velocity_(i) - acceleration_step, std::min(velocity_(i) + acceleration_step, smoothed));
+    velocity_(i) = std::max(-limits_.max_velocity, std::min(limits_.max_velocity, bounded));
+  }
+  return velocity_;
+}
+
+void JointVelocityProfile::reset()
+{
+  velocity_.setZero();
+}
+
+Eigen::VectorXd integrateJointVelocity(
+  const Eigen::VectorXd & position, const Eigen::VectorXd & velocity, double dt,
+  const Eigen::VectorXd & lower, const Eigen::VectorXd & upper)
+{
+  if (position.size() != velocity.size()) {
+    // Nothing can be integrated against a speed that belongs to other joints.
+    // Staying where the reference is beats moving it by a guess.
+    return position;
+  }
+
+  Eigen::VectorXd next = position + velocity * sanitiseDeltaSeconds(dt);
+  if (lower.size() == next.size() && upper.size() == next.size()) {
+    next = next.cwiseMax(lower).cwiseMin(upper);
+  }
+  return next;
+}
+
+double leadScale(const Eigen::VectorXd & error, double margin)
+{
+  if (error.size() == 0 || margin <= 0.0) {
+    return 1.0;
+  }
+  const double worst = error.cwiseAbs().maxCoeff();
+  // Inside the soft band the command is untouched, because a lead smaller than
+  // this is just the arm's tracking error and scaling for it would make the arm
+  // slower than the operator every time it lagged at all.
+  const double soft = 0.5 * margin;
+  if (worst <= soft) {
+    return 1.0;
+  }
+  if (worst >= margin) {
+    return 0.0;
+  }
+  return (margin - worst) / (margin - soft);
+}
+
+CartesianTwist twistAtOffset(const CartesianTwist & twist, const Eigen::Vector3d & offset)
+{
+  CartesianTwist carried = twist;
+  carried.linear = twist.linear - twist.angular.cross(offset);
+  return carried;
 }
 
 }  // namespace litearm_vr_teleop

@@ -46,6 +46,22 @@ vr_forward_controller:
     # the wrong axis.
     joints: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
 
+    # The command topic carries either N values or 2N, and the length says which:
+    #
+    #   N = 7    one position per joint, in the order above. The velocity this
+    #            controller writes beside each one is derived from the stream,
+    #            over the interval between arrivals.
+    #   2N = 14  the seven positions, then the seven velocities to carry them.
+    #            Written as given, clamped by max_velocity below. This is what
+    #            vr_teleop publishes: it runs the rate limiter, so it knows the
+    #            speed it is asking for, and the field the firmware reads as the
+    #            slew ceiling of its position reference is that speed rather than
+    #            a differentiation of it.
+    #
+    # Any other length is refused and the joints hold, with an error naming both
+    # accepted sizes. The order of the joint names here has to match the node's
+    # own list, which test_rate_consistency checks.
+
     # Ceiling on the velocity written alongside each position, rad/s.
     #
     # The firmware reads the velocity field of its command frame as the slew
@@ -53,7 +69,9 @@ vr_forward_controller:
     # hint. 1.0 rad/s is the same guard rail as the arm's servo controller uses:
     # well above anything a teleoperation approach needs (a 3 cm/s tool motion is
     # about 0.06 rad/s at the joints), and well below the firmware's own speed
-    # limit, where crossing it is a fault rather than a slow-down.
+    # limit, where crossing it is a fault rather than a slow-down. It is a
+    # guard rail, not a tuning knob: the speed the operator gets is set by the
+    # node's own limits.
     max_velocity: 1.0
 
     # A setpoint older than this is treated as absent and the joints hold. This is

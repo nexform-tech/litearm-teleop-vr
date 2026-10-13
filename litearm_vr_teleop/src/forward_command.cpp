@@ -27,6 +27,15 @@ bool ForwardCommandTracker::update(
   const Eigen::VectorXd * target, const Eigen::VectorXd & measured, double command_age,
   bool new_command, double dt, Eigen::VectorXd & positions, Eigen::VectorXd & velocities)
 {
+  return update(
+    target, nullptr, measured, command_age, new_command, dt, positions, velocities);
+}
+
+bool ForwardCommandTracker::update(
+  const Eigen::VectorXd * target, const Eigen::VectorXd * velocity_target,
+  const Eigen::VectorXd & measured, double command_age, bool new_command, double dt,
+  Eigen::VectorXd & positions, Eigen::VectorXd & velocities)
+{
   if (positions.size() != positions_.size() || velocities.size() != positions_.size()) {
     // The caller's buffers are not sized for this joint count. Writing anything
     // would be out of bounds, and the caller has a bug it should see rather than
@@ -34,9 +43,16 @@ bool ForwardCommandTracker::update(
     return true;
   }
 
+  // A stated velocity that is not this robot's is as unusable as no command at
+  // all: acting on the position while putting another robot's speed in the
+  // ceiling is worse than holding.
+  const bool velocity_usable =
+    velocity_target == nullptr || velocity_target->size() == positions_.size();
+
   const bool stale = limits_.command_timeout_s > 0.0 && command_age > limits_.command_timeout_s;
   const bool usable =
-    target != nullptr && target->size() == positions_.size() && command_age >= 0.0 && !stale;
+    target != nullptr && target->size() == positions_.size() && command_age >= 0.0 && !stale &&
+    velocity_usable;
 
   if (!usable) {
     // Hold. The velocity is written as zero deliberately: this arm's only way to
@@ -63,14 +79,19 @@ bool ForwardCommandTracker::update(
   }
 
   if (new_command) {
-    // The one cycle per setpoint where there is something to differentiate. The
-    // previous positions are still intact while the velocity is computed from
-    // them, and are only overwritten afterwards.
+    // The one cycle per setpoint where there is something to say about the
+    // ceiling. The previous positions are still intact while the velocity is
+    // worked out from them, and are only overwritten afterwards.
     const double inverse_dt = 1.0 / std::max(1e-3, dt);
     const Eigen::Index count = positions_.size();
     positions = *target;
     for (Eigen::Index i = 0; i < count; ++i) {
-      double velocity = (positions(i) - positions_(i)) * inverse_dt;
+      // The speed the sender stated, or - when it stated none - the step from
+      // the previous setpoint over the interval it happened in. Either way it is
+      // a ceiling on how fast the reference may be slewed to the position
+      // written beside it, so it is clamped to the same limit.
+      double velocity = velocity_target != nullptr ?
+        (*velocity_target)(i) : (positions(i) - positions_(i)) * inverse_dt;
       if (limits_.max_velocity > 0.0) {
         velocity = std::clamp(velocity, -limits_.max_velocity, limits_.max_velocity);
       }

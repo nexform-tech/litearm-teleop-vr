@@ -299,8 +299,8 @@ private:
     // so it is a parameter here too, with the same default as that node
     // (config/vr_teleop.yaml). With the same value the pose drawn is the pose
     // the teleoperation node computes.
-    limits_.moving_average_frames = static_cast<std::size_t>(
-      std::max(1, readParameter<int>("moving_average_frames", 10)));
+    limits_.moving_average_samples = static_cast<std::size_t>(
+      std::max(1, readParameter<int>("moving_average_samples", 10)));
 
     // The same two mapping parameters as the teleoperation node, for the same
     // reason as the average above: a viewer that drew a different mapping from
