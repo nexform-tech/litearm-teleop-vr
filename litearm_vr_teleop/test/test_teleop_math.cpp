@@ -946,5 +946,38 @@ TEST(TeleopMath, LeadScaleGuardsTheIntegratedReference)
   EXPECT_DOUBLE_EQ(leadScale(Eigen::VectorXd(), 0.2), 1.0);
 }
 
+/// A trigger resting near its threshold must not oscillate.
+///
+/// Measured on the rig this was written for: an analogue trigger nobody was
+/// touching produced an open/close pair every half second, at exactly the minimum
+/// close window, because the value wandered across a single threshold. A debounce
+/// cannot fix that - it only asks the signal to stay put for 50 ms, which a slow
+/// wobble does - so the press and the release happen at two different values.
+TEST(TeleopMath, TriggerHasHysteresis)
+{
+  const double press_at = 0.5;
+  const double hysteresis = 0.1;
+
+  // From released, it takes a value above the threshold to press.
+  EXPECT_FALSE(triggerPressed(0.50, false, press_at, hysteresis));
+  EXPECT_TRUE(triggerPressed(0.51, false, press_at, hysteresis));
+
+  // Once pressed, a wobble below the threshold keeps it pressed...
+  EXPECT_TRUE(triggerPressed(0.45, true, press_at, hysteresis));
+  EXPECT_TRUE(triggerPressed(0.41, true, press_at, hysteresis));
+
+  // ...and only a release past the far threshold opens it.
+  EXPECT_FALSE(triggerPressed(0.39, true, press_at, hysteresis));
+
+  // The band is directional: released inside it stays released, so a value that
+  // sits in the band cannot produce an edge at all.
+  EXPECT_FALSE(triggerPressed(0.45, false, press_at, hysteresis));
+
+  // Zero hysteresis is the bare threshold, which is what oscillated.
+  EXPECT_FALSE(triggerPressed(0.499, false, press_at, 0.0));
+  EXPECT_TRUE(triggerPressed(0.501, false, press_at, 0.0));
+  EXPECT_FALSE(triggerPressed(0.499, true, press_at, 0.0));
+}
+
 }  // namespace
 }  // namespace litearm_vr_teleop

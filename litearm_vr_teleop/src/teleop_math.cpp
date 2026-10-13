@@ -617,6 +617,15 @@ double leadScale(const Eigen::VectorXd & error, double margin)
   return (margin - worst) / (margin - soft);
 }
 
+bool triggerPressed(double trigger, bool was_pressed, double press_at, double hysteresis)
+{
+  const double release_at = press_at - std::max(0.0, hysteresis);
+  if (was_pressed) {
+    return trigger >= release_at;
+  }
+  return trigger > press_at;
+}
+
 CartesianTwist twistAtOffset(const CartesianTwist & twist, const Eigen::Vector3d & offset)
 {
   CartesianTwist carried = twist;

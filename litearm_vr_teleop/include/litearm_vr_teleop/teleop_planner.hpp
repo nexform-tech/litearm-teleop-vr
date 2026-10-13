@@ -60,7 +60,7 @@ public:
 
   struct Options
   {
-    IkBackend backend = IkBackend::kPlugin;
+    IkBackend backend = IkBackend::kDls;
     /// Planning group, and the prefix under which the solver reads its own
     /// parameters (MoveIt's convention: `litearm_arm.kinematics_solver`).
     std::string group_name = "litearm_arm";

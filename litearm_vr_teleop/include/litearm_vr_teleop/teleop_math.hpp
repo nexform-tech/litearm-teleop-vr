@@ -580,6 +580,23 @@ Eigen::VectorXd integrateJointVelocity(
   const Eigen::VectorXd & position, const Eigen::VectorXd & velocity, double dt,
   const Eigen::VectorXd & lower, const Eigen::VectorXd & upper);
 
+/// Whether the trigger counts as pressed, with hysteresis.
+///
+/// One threshold on an analogue input that rests anywhere near it is an
+/// oscillator: a hand holding the trigger half way, a worn pot, or a headset
+/// reporting a value that drifts across the line all produce a stream of press and
+/// release edges, and the debounce cannot help - it only asks the signal to stay
+/// put for 50 ms, which a slow wobble does. Measured on this rig: an open/close
+/// pair every half second, at exactly the minimum close window, from a trigger
+/// nobody was touching.
+///
+/// Hysteresis is the answer rather than a longer debounce, because a longer
+/// debounce delays every real press while a pair of thresholds costs nothing: it
+/// takes `press_at` to close and it takes a release below
+/// `press_at - hysteresis` to open, so a signal that wanders between them keeps
+/// whatever state it already had.
+bool triggerPressed(double trigger, bool was_pressed, double press_at, double hysteresis);
+
 /// Scale a joint velocity command down as the reference runs away from the arm.
 ///
 /// The velocity form integrates, so an arm that lags leaves the reference further

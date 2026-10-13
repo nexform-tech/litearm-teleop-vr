@@ -338,12 +338,20 @@ private:
     }
 
     TeleopPlanner::Options planner_options;
-    const std::string backend = readParameter<std::string>("ik_backend", "plugin");
-    if (backend == "dls") {
+    // dls unless asked otherwise: in process, deterministic and fast enough to run
+    // per target, where the plugin's latency and its restart inside the null space
+    // are both things a following task has to work around. The plugin is kept
+    // because a rig may want the solver it tuned, and because the two can be
+    // compared on the same arm.
+    const std::string backend = readParameter<std::string>("ik_backend", "dls");
+    if (backend == "plugin") {
+      planner_options.backend = TeleopPlanner::IkBackend::kPlugin;
+    } else {
+      if (backend != "dls") {
+        RCLCPP_WARN(
+          get_logger(), "ik_backend '%s' is not a backend; using 'dls'", backend.c_str());
+      }
       planner_options.backend = TeleopPlanner::IkBackend::kDls;
-    } else if (backend != "plugin") {
-      RCLCPP_WARN(
-        get_logger(), "ik_backend '%s' is not a backend; using 'plugin'", backend.c_str());
     }
     planner_options.group_name = readParameter<std::string>("group_name", "litearm_arm");
     planner_options.base_frame = readParameter<std::string>("base_frame", "base_link");
@@ -394,6 +402,10 @@ private:
     // interval, and a coefficient would mean a different cutoff on every late
     // tick. Zero leaves the acceleration ceiling to shape the command alone.
     velocity_limits_.filter_tau = readParameter<double>("velocity_filter_tau", 0.03);
+
+    // How far below the press threshold the trigger has to fall before the release
+    // counts. Zero restores the bare threshold, and with it the oscillation.
+    trigger_hysteresis_ = readParameter<double>("trigger_hysteresis", 0.1);
 
     // How far the integrated reference may run ahead of the arm, per joint. The
     // joint space counterpart of max_target_lead_m, and it exists because the
@@ -556,8 +568,11 @@ private:
     if (frame->side != "right") {
       // The single arm rig is driven by the right controller. Saying so once is
       // more useful than silently ignoring frames forever.
-      RCLCPP_WARN_ONCE(
-        get_logger(), "ignoring frames for side '%s'; this node follows the right controller",
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "ignoring frames for side '%s': this node follows the right controller, so check that "
+        "the right one is on and tracked - the left one being the only one that reports is "
+        "indistinguishable from a headset that stopped, except by this line",
         frame->side.c_str());
       return;
     }
@@ -736,7 +751,11 @@ private:
       return;
     }
 
-    const bool pressed = latest_frame_.trigger > trigger_threshold_;
+    // Hysteresis, not a bare threshold: see triggerPressed for the measurement that
+    // made this necessary - an analogue trigger resting on the line produced a
+    // press and a release every half second.
+    const bool pressed = triggerPressed(
+      latest_frame_.trigger, trigger_raw_, trigger_threshold_, trigger_hysteresis_);
     if (pressed != trigger_raw_) {
       trigger_raw_ = pressed;
       trigger_changed_at_ = now;
@@ -1433,6 +1452,8 @@ private:
   double last_tick_ = steadySeconds();
 
   bool saw_grip_ = false;
+  /// How far below the press threshold a release has to fall. See triggerPressed.
+  double trigger_hysteresis_ = 0.1;
   bool trigger_raw_ = false;
   bool trigger_stable_ = false;
   double trigger_changed_at_ = 0.0;

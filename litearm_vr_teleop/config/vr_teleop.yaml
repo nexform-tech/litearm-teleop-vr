@@ -51,13 +51,18 @@ vr_teleop:
 
     # Which inverse kinematics backend. Both are implemented and either can be
     # selected at any time; see the class documentation in teleop_planner.hpp.
+    #   dls     damped least squares implemented in this package, on top of the
+    #           MoveIt core's forward kinematics and Jacobian. Predictable latency,
+    #           in process, and deterministic - which is what a following task
+    #           wants, and why it is the default. It is also the solver the
+    #           velocity form uses whatever this says, since that path has no
+    #           plugin in it at all.
     #   plugin  the solver named below, loaded through pluginlib. Reuses the
     #           MoveIt configuration, at the cost of a latency this node does not
-    #           control (the configuration budgets 0.2 s per call).
-    #   dls     damped least squares implemented in this package, on top of the
-    #           MoveIt core's forward kinematics and Jacobian. Predictable
-    #           latency, which is what a following task wants.
-    ik_backend: plugin
+    #           control (the configuration budgets 0.2 s per call). Kept because a
+    #           rig may want the solver it already tuned, and because the two can
+    #           be compared on the same arm.
+    ik_backend: dls
 
     # 当雅可比的最小奇异值低于这个数时，改用本包的阻尼最小二乘后端求解（0 = 关闭）。
     #
@@ -269,6 +274,12 @@ vr_teleop:
     gripper_open_position: 0.07479
     gripper_close_position: 0.0
     gripper_max_effort: 3.5
+
+    # How far the trigger has to fall below the threshold before that counts as a
+    # release. One threshold on an analogue input that rests near it oscillates: on
+    # this rig a trigger nobody was touching produced an open/close pair every half
+    # second. Zero restores the bare threshold.
+    trigger_hysteresis: 0.1
 
     # Trigger analogue threshold, debounce, and a floor on how long a close lasts.
     # Operators release the trigger while the fingers are still travelling; without
